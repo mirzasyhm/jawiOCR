@@ -1,4 +1,4 @@
-conda==4.10.3
+conda==4.10
 opencv-python==4.5.3.56
 Pillow==9.3.0
 Polygon3==3.0.9.1
