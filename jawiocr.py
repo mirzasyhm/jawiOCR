@@ -278,22 +278,40 @@ def main_ocr_pipeline(args):
             
             if pred_texts and len(pred_texts) > 0:
                 recognized_text = pred_texts[0]
-                confidence_tensor = pred_confs[0] if pred_confs and len(pred_confs) > 0 else None
+                # pred_confs[0] is likely the tensor with per-token confidences for the first (and only) item in the batch
+                token_confidences_tensor = pred_confs[0] if pred_confs and len(pred_confs) > 0 else None
                 
-                # Convert confidence tensor to Python float before formatting
-                confidence_float = None
-                if confidence_tensor is not None:
-                    if isinstance(confidence_tensor, torch.Tensor):
-                        confidence_float = confidence_tensor.item() 
-                    else: # If it's already a float (though STRHub usually gives tensor)
-                        confidence_float = confidence_tensor
+                confidence_value_for_sequence = None # Initialize
+                if token_confidences_tensor is not None:
+                    if isinstance(token_confidences_tensor, torch.Tensor):
+                        if token_confidences_tensor.numel() == 1: # If it's already a scalar tensor
+                            confidence_value_for_sequence = token_confidences_tensor.item()
+                        elif token_confidences_tensor.numel() > 1: # If it's a 1-D tensor with multiple confidences
+                            # Option 1: Take the mean of token confidences
+                            confidence_value_for_sequence = token_confidences_tensor.mean().item()
+                            # Option 2: Take the minimum token confidence (more conservative)
+                            # confidence_value_for_sequence = token_confidences_tensor.min().item()
+                            # Option 3: You could also just store the list if needed:
+                            # confidence_value_for_sequence = token_confidences_tensor.tolist() 
+                            # But for a single score, mean or min is typical.
+                        else: # Empty tensor
+                             pass # confidence_value_for_sequence remains None
+                    else: # If it's already a float/list (less likely from STRHub decode)
+                        confidence_value_for_sequence = token_confidences_tensor 
+                
+                # Ensure confidence_value_for_sequence is a float for printing/saving, or handle list if chosen
+                if isinstance(confidence_value_for_sequence, list):
+                     # If you chose to store the list, decide how to represent it for printing
+                     print_conf_str = str(confidence_value_for_sequence)
+                elif confidence_value_for_sequence is not None:
+                     print_conf_str = f"{confidence_value_for_sequence:.4f}"
+                else:
+                     print_conf_str = "N/A"
 
-                print(f"Region {i+1}: Text = '{recognized_text}'" + 
-                      (f", Conf = {confidence_float:.4f}" if confidence_float is not None else ""))
+                print(f"Region {i+1}: Text = '{recognized_text}', Conf = {print_conf_str}")
                 
-                # Store the float value of confidence in results
                 results.append({'polygon': poly_pts, 'text': recognized_text, 
-                                'confidence': confidence_float}) # Store float here
+                                'confidence': confidence_value_for_sequence}) # Store the chosen representation
                 
                 cv2.polylines(output_image_viz, [poly_pts.astype(np.int32)], True, (0,255,0), 2)
             else:
@@ -310,8 +328,15 @@ def main_ocr_pipeline(args):
         with open(text_result_filepath, 'w', encoding='utf-8') as f:
             for res in results:
                 poly_str = ";".join([f"{int(p[0])},{int(p[1])}" for p in res['polygon']])
-                # Confidence is now a float, so this formatting is fine
-                conf_str = f"{res['confidence']:.4f}" if res['confidence'] is not None else "N/A"
+                
+                # Adjust saving based on how confidence is stored (float or list)
+                if isinstance(res['confidence'], list):
+                    conf_str = ", ".join([f"{c:.4f}" for c in res['confidence']]) # Example: "0.98, 0.95, ..."
+                elif res['confidence'] is not None:
+                    conf_str = f"{res['confidence']:.4f}"
+                else:
+                    conf_str = "N/A"
+                
                 f.write(f"Polygon: [{poly_str}] | Text: {res['text']} | Confidence: {conf_str}\n")
         print(f"Text OCR results saved to: {text_result_filepath}")
     print("OCR pipeline finished.")
