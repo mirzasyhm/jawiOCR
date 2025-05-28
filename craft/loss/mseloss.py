@@ -75,7 +75,7 @@ class Maploss_v2(nn.Module):
         neg_rto,
         n_min_neg,
     ):
-        loss_fn = torch.nn.MSELoss(reduce=False, size_average=False)
+        loss_fn = torch.nn.MSELoss(reduction="none")
         assert (
             region_scores_label.size() == region_scores_pre.size()
             and affinity_socres_label.size() == affinity_scores_pre.size()
