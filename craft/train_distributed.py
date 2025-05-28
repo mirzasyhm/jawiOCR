@@ -87,7 +87,7 @@ class Trainer(object):
 
         if self.config.train.ckpt_path is not None:
             map_location = "cuda:%d" % gpu
-            param = torch.load(self.config.train.ckpt_path, map_location=map_location)
+            param = torch.load(self.config.train.ckpt_path, map_location=map_location, weights_only=False)
         else:
             param = None
 
