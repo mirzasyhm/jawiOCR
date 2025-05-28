@@ -100,44 +100,118 @@ def getDetBoxes_core(textmap, linkmap, text_threshold, link_threshold, low_text)
         mapper.append(k)
     return det, labels, mapper
 
+
 def getPoly_core(boxes, labels, mapper, linkmap):
-    num_cp = 5; max_len_ratio = 0.7; expand_ratio = 1.45; max_r = 2.0; step_r = 0.2
-    polys = []  
-    for k,box in enumerate(boxes):
-        w, h = int(np.linalg.norm(box[0]-box[1])+0.5), int(np.linalg.norm(box[1]-box[2])+0.5)
-        if w < 10 or h < 10: polys.append(None); continue
-        tar = np.float32([[0,0],[w,0],[w,h],[0,h]])
+    # configs
+    num_cp = 5
+    max_len_ratio = 0.7
+    # expand_ratio = 1.45 # This was in EasyOCR's original but not directly used in the provided snippet's logic flow
+    max_r = 2.0
+    step_r = 0.2
+
+    polys = []
+    for k, box in enumerate(boxes):
+        # size filter for small instance
+        w = int(np.linalg.norm(box[0] - box[1]) + 0.5)
+        h = int(np.linalg.norm(box[1] - box[2]) + 0.5)
+        if w < 10 or h < 10:
+            polys.append(None)
+            continue
+
+        # warp image
+        tar = np.float32([[0, 0], [w, 0], [w, h], [0, h]])
         M = cv2.getPerspectiveTransform(box, tar)
-        word_label = cv2.warpPerspective(labels, M, (w,h), flags=cv2.INTER_NEAREST)
-        try: Minv = np.linalg.inv(M)
-        except: polys.append(None); continue
+        word_label = cv2.warpPerspective(labels, M, (w, h), flags=cv2.INTER_NEAREST)
+        try:
+            Minv = np.linalg.inv(M)
+        except np.linalg.LinAlgError: # Catch singular matrix error
+            polys.append(None)
+            continue
+
+        # binarization for selected label
         cur_label = mapper[k]
         word_label[word_label != cur_label] = 0
         word_label[word_label > 0] = 1
-        cp_checked = False
+
+        """ Polygon generation """
+        # Initialize lists to store contour points
+        cp_top_list = []
+        cp_bot_list = []
+        cp_checked = False # Flag to ensure at least one point was found
+
         for i in range(num_cp):
-            curr = int(w / (num_cp-1) * i)
-            if curr == w: curr -= 1
-            top_cnt_pts = np.where(word_label[:,curr]!=0)[0]
-            if not top_cnt_pts.size > 0: continue # Changed from len(top_cnt_pts) == 0 for robustness
-            else: cp_checked = True
-            top_cp = np.array([curr, top_cnt_pts[0]], dtype=np.int32).reshape(1,2)
-            bot_cp = np.array([curr, top_cnt_pts[-1]], dtype=np.int32).reshape(1,2)
-            if i == 0: cp_top, cp_bot = top_cp, bot_cp
+            # Calculate current column, ensure it's within word_label bounds
+            curr = int(w / (num_cp - 1) * i) if num_cp > 1 else 0
+            if curr == w and w > 0: curr -= 1 # Adjust if at the very edge
+
+            if not (0 <= curr < word_label.shape[1]): # Check if curr is a valid column index
+                continue
+
+            top_cnt_pts = np.where(word_label[:, curr] != 0)[0]
+            
+            if not top_cnt_pts.size > 0: # If no points found in this column
+                continue
             else:
-                cp_top = np.concatenate((cp_top, top_cp), axis=0)
-                cp_bot = np.concatenate((cp_bot, bot_cp), axis=0)
-        if not cp_checked or len(cp_top) < num_cp or len(cp_bot) < num_cp: polys.append(None); continue # Simplified check
-        for r_idx, r_val in enumerate(np.arange(0.5, max_r, step_r)): # Pythonic loop
-            top_link_pts = sum(1 for i in range(len(cp_top)-1) if linkmap[int((cp_top[i][1]+cp_top[i+1][1])/2), int((cp_top[i][0]+cp_top[i+1][0])/2)] == 1)
-            bot_link_pts = sum(1 for i in range(len(cp_bot)-1) if linkmap[int((cp_bot[i][1]+cp_bot[i+1][1])/2), int((cp_bot[i][0]+cp_bot[i+1][0])/2)] == 1)
-            if top_link_pts > max_len_ratio * num_cp or bot_link_pts > max_len_ratio * num_cp: polys.append(None); break
+                cp_checked = True
+            
+            # Add the top-most and bottom-most points for this column
+            cp_top_list.append(np.array([curr, top_cnt_pts[0]], dtype=np.int32))
+            cp_bot_list.append(np.array([curr, top_cnt_pts[-1]], dtype=np.int32))
+        
+        # If not enough contour points were found (e.g., less than num_cp as in EasyOCR's logic)
+        if not cp_checked or len(cp_top_list) < num_cp or len(cp_bot_list) < num_cp:
+            # This condition implies that if points from all 'num_cp' slices aren't found,
+            # the polygon isn't considered valid. Adjust if fewer points are acceptable.
+            polys.append(None)
+            continue
+        
+        # Convert lists of points to NumPy arrays
+        cp_top = np.array(cp_top_list).reshape(-1, 2)
+        cp_bot = np.array(cp_bot_list).reshape(-1, 2)
+
+        # Now, cp_top and cp_bot are guaranteed to be NumPy arrays if this point is reached.
+        # Proceed with polygon refinement
+        final_poly = None # To store the polygon after checking link conditions
+
+        for r_val in np.arange(0.5, max_r, step_r): # Loop for link checks (from EasyOCR)
+            top_link_pts = 0
+            if cp_top.shape[0] >= 2: # Need at least 2 points to form segments
+                for idx_pt in range(cp_top.shape[0] - 1):
+                    pt_1, pt_2 = cp_top[idx_pt], cp_top[idx_pt + 1]
+                    mid_pt_x, mid_pt_y = int((pt_1[0] + pt_2[0]) / 2), int((pt_1[1] + pt_2[1]) / 2)
+                    # Boundary check for mid_pt accessing linkmap
+                    if 0 <= mid_pt_y < linkmap.shape[0] and 0 <= mid_pt_x < linkmap.shape[1]:
+                        if linkmap[mid_pt_y, mid_pt_x] == 1:
+                            top_link_pts += 1
+            
+            bot_link_pts = 0
+            if cp_bot.shape[0] >= 2:
+                for idx_pt in range(cp_bot.shape[0] - 1):
+                    pt_1, pt_2 = cp_bot[idx_pt], cp_bot[idx_pt + 1]
+                    mid_pt_x, mid_pt_y = int((pt_1[0] + pt_2[0]) / 2), int((pt_1[1] + pt_2[1]) / 2)
+                    if 0 <= mid_pt_y < linkmap.shape[0] and 0 <= mid_pt_x < linkmap.shape[1]:
+                        if linkmap[mid_pt_y, mid_pt_x] == 1:
+                            bot_link_pts += 1
+
+            # If too many points on the contour are part of link areas
+            if top_link_pts > max_len_ratio * cp_top.shape[0] or \
+               bot_link_pts > max_len_ratio * cp_bot.shape[0]:
+                final_poly = None 
+                break # Discard this polygon candidate and break from r_val refinement loop
+
+            # Ideal case: no link points on the contour
             if top_link_pts == 0 and bot_link_pts == 0:
-                poly = np.concatenate((cp_top, np.flip(cp_bot,axis=0)), axis=0)
-                polys.append(cv2.perspectiveTransform(np.array([poly], dtype=np.float32), Minv)[0]); break
-            elif r_idx == len(np.arange(0.5, max_r, step_r)) -1 : # last iteration
-                 polys.append(None); break # if no solution found after all iterations
+                poly_coords = np.concatenate((cp_top, np.flip(cp_bot, axis=0)), axis=0)
+                final_poly = cv2.perspectiveTransform(np.array([poly_coords], dtype=np.float32), Minv)[0]
+                break # Found a good polygon, break from r_val refinement loop
+            
+            # If the loop finishes without breaking, final_poly's last state is used.
+            # (EasyOCR has more complex patch-based refinement here, omitted for now if not the root cause)
+
+        polys.append(final_poly) # Append the polygon (or None if not found/valid)
     return polys
+
+
 
 def getDetBoxes(textmap, linkmap, text_threshold, link_threshold, low_text, poly=False):
     boxes, labels, mapper = getDetBoxes_core(textmap, linkmap, text_threshold, link_threshold, low_text)
