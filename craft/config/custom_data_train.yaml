@@ -14,7 +14,7 @@ train:
   synth_data_dir: "/data/SynthText/"
   synth_ratio: 5
   real_dataset: custom
-  ckpt_path: "./exp/CRAFT_clr_amp_29500.pth"
+  ckpt_path: "./pretrained/CRAFT_clr_amp_29500.pth"
   eval_interval: 1000
   batch_size: 5
   st_iter: 0
