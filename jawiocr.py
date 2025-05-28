@@ -277,11 +277,24 @@ def main_ocr_pipeline(args):
             pred_texts, pred_confs = parseq_model.tokenizer.decode(probabilities)
             
             if pred_texts and len(pred_texts) > 0:
-                recognized_text = pred_texts[0] # For batch size 1, take the first text
-                confidence = pred_confs[0] if pred_confs and len(pred_confs) > 0 else None
+                recognized_text = pred_texts[0]
+                confidence_tensor = pred_confs[0] if pred_confs and len(pred_confs) > 0 else None
                 
-                print(f"Region {i+1}: Text = '{recognized_text}'" + (f", Conf = {confidence:.4f}" if confidence is not None else ""))
-                results.append({'polygon': poly_pts, 'text': recognized_text, 'confidence': confidence})
+                # Convert confidence tensor to Python float before formatting
+                confidence_float = None
+                if confidence_tensor is not None:
+                    if isinstance(confidence_tensor, torch.Tensor):
+                        confidence_float = confidence_tensor.item() 
+                    else: # If it's already a float (though STRHub usually gives tensor)
+                        confidence_float = confidence_tensor
+
+                print(f"Region {i+1}: Text = '{recognized_text}'" + 
+                      (f", Conf = {confidence_float:.4f}" if confidence_float is not None else ""))
+                
+                # Store the float value of confidence in results
+                results.append({'polygon': poly_pts, 'text': recognized_text, 
+                                'confidence': confidence_float}) # Store float here
+                
                 cv2.polylines(output_image_viz, [poly_pts.astype(np.int32)], True, (0,255,0), 2)
             else:
                 print(f"Warning: No text decoded from Parseq for region {i+1}")
@@ -297,6 +310,7 @@ def main_ocr_pipeline(args):
         with open(text_result_filepath, 'w', encoding='utf-8') as f:
             for res in results:
                 poly_str = ";".join([f"{int(p[0])},{int(p[1])}" for p in res['polygon']])
+                # Confidence is now a float, so this formatting is fine
                 conf_str = f"{res['confidence']:.4f}" if res['confidence'] is not None else "N/A"
                 f.write(f"Polygon: [{poly_str}] | Text: {res['text']} | Confidence: {conf_str}\n")
         print(f"Text OCR results saved to: {text_result_filepath}")
