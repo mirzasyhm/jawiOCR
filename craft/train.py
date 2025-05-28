@@ -211,7 +211,8 @@ class Trainer(object):
         # LOSS --------------------------------------------------------------------------------------------------------#
         # mixed precision
         if self.config.train.amp:
-            scaler = torch.cuda.amp.GradScaler()
+            scaler = torch.amp.GradScaler('cuda')
+
 
             if (
                     self.config.train.ckpt_path is not None
