@@ -248,7 +248,7 @@ def main_eval(model_path, backbone, config, evaluator, result_dir, buffer, model
             raise Exception("Undefined architecture")
 
         print("Loading weights from checkpoint (" + model_path + ")")
-        net_param = torch.load(model_path, map_location=f"cuda:{gpu_idx}")
+        net_param = torch.load(model_path, map_location=f"cuda:{gpu_idx}", weights_only=False)
         model.load_state_dict(copyStateDict(net_param["craft"]))
 
         if config.cuda:
