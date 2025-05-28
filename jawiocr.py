@@ -20,7 +20,7 @@ print(f"Attempting to use Parseq modules from: {parseq_dir}")
 
 # --- CRAFT Model Import and Utilities (from previous demo.py) ---
 try:
-    from craft.model.craft import CRAFT # Assumes craft/model/craft.py
+    from model.craft import CRAFT # Assumes craft/model/craft.py
 except ImportError:
     print("Error: Could not import 'CRAFT' from 'model.craft'. Ensure script context or PYTHONPATH.")
     sys.exit(1)
