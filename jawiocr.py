@@ -241,7 +241,7 @@ def get_global_page_orientation_tesseract(image_bgr, tesseract_lang='ara', dpi=3
     print("Attempting global page orientation detection with Tesseract OSD...")
     try:
         pil_img = PILImage.fromarray(cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB))
-        osd_data = pytesseract.image_to_osd(pil_img, output_type=Output.DICT)
+        osd_data = pytesseract.image_to_osd(pil_img, lang=tesseract_lang, config='--psm 3')
         
         detected_page_orientation = 0 
         for line in osd_data.split('\n'):
