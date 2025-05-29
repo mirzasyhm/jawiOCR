@@ -4,26 +4,19 @@ from tensorflow.keras.preprocessing import image_dataset_from_directory
 from tensorflow.keras.layers import Rescaling
 import os
 
-# Constants for dataset loading
-# These can be imported or overridden in training.py if needed,
-# but good to have defaults here.
-IMG_WIDTH = 128
-IMG_HEIGHT = 128
-BATCH_SIZE = 64
+IMG_WIDTH = 224 # Default, will be overridden by training.py for ResNet50
+IMG_HEIGHT = 224 # Default, will be overridden by training.py for ResNet50
+BATCH_SIZE = 32
 NUM_CLASSES = 4
 
-
 def create_datasets(img_size, batch_size, train_dir_path, val_dir_path, test_dir_path=None):
-    """
-    Loads and preprocesses the training, validation, and optional test datasets.
-    """
+    # ... (rest of the function remains unchanged from your previous version)
     print(f"Loading training images from: {train_dir_path}")
     train_dataset = image_dataset_from_directory(
         train_dir_path,
         labels='inferred',
         label_mode='int',
         image_size=img_size,
-        color_mode='grayscale',
         interpolation='nearest',
         batch_size=batch_size,
         shuffle=True,
@@ -36,7 +29,6 @@ def create_datasets(img_size, batch_size, train_dir_path, val_dir_path, test_dir
         labels='inferred',
         label_mode='int',
         image_size=img_size,
-        color_mode='grayscale',
         interpolation='nearest',
         batch_size=batch_size,
         shuffle=False,
@@ -45,17 +37,20 @@ def create_datasets(img_size, batch_size, train_dir_path, val_dir_path, test_dir
 
     class_names = train_dataset.class_names
     print(f"Class names found: {class_names}")
-    # It's good practice to ensure NUM_CLASSES matches what's found in the data
-    # This can be done in the training script where NUM_CLASSES is definitively set.
-    # if len(class_names) != NUM_CLASSES:
-    #     raise ValueError(f"Expected {NUM_CLASSES} classes, but found {len(class_names)} in training data: {class_names}")
 
-
-    normalization_layer = Rescaling(1./255)
+    # Normalization will be handled by ResNet50's preprocess_input
+    # So, the Rescaling(1./255) layer can be removed if preprocess_input is used
+    # However, keeping it for consistency before preprocess_input is also fine,
+    # as preprocess_input typically handles scaling to -1 to 1 or 0 to 255 based on mode.
+    # For this example, we'll apply ResNet's specific preprocessing later.
+    # We'll still do basic 0-1 scaling here for consistency if preprocess_input wasn't used.
+    
+    normalization_layer = Rescaling(1./255) # This scales to [0,1]
     train_dataset = train_dataset.map(lambda x, y: (normalization_layer(x), y),
                                       num_parallel_calls=tf.data.AUTOTUNE)
     validation_dataset = validation_dataset.map(lambda x, y: (normalization_layer(x), y),
                                                 num_parallel_calls=tf.data.AUTOTUNE)
+
 
     train_dataset = train_dataset.cache().prefetch(buffer_size=tf.data.AUTOTUNE)
     validation_dataset = validation_dataset.cache().prefetch(buffer_size=tf.data.AUTOTUNE)
@@ -68,12 +63,11 @@ def create_datasets(img_size, batch_size, train_dir_path, val_dir_path, test_dir
             labels='inferred',
             label_mode='int',
             image_size=img_size,
-            color_mode='grayscale',
             interpolation='nearest',
             batch_size=batch_size,
-            shuffle=False # No shuffle for test data
+            shuffle=False
         )
-        test_dataset = test_dataset.map(lambda x, y: (normalization_layer(x), y),
+        test_dataset = test_dataset.map(lambda x, y: (normalization_layer(x), y), # Apply 0-1 scaling here too
                                         num_parallel_calls=tf.data.AUTOTUNE)
         test_dataset = test_dataset.cache().prefetch(buffer_size=tf.data.AUTOTUNE)
 
