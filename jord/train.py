@@ -31,7 +31,7 @@ print(f"Using mixed precision policy: {policy.name}")
 # Dataset directory paths
 BASE_DIR = 'jawi_orientation_dataset'
 TRAIN_DIR = os.path.join(BASE_DIR, 'train')
-VALIDATION_DIR = os.path.join(BASE_DIR, 'validation')
+VALIDATION_DIR = os.path.join(BASE_DIR, 'val')
 TEST_DIR = os.path.join(BASE_DIR, 'test')
 
 # Model save paths
