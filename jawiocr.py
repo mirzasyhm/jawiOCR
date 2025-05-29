@@ -8,7 +8,6 @@ import torch
 import torch.backends.cudnn as cudnn
 from collections import OrderedDict
 from PIL import Image as PILImage
-from pytesseract import Output
 from torchvision import transforms as TorchTransforms
 import pytesseract # For global page OSD
 
@@ -234,14 +233,29 @@ def rotate_image_cv(image_cv, angle_degrees):
     elif angle_degrees == 90: return cv2.rotate(image_cv, cv2.ROTATE_90_CLOCKWISE)
     elif angle_degrees == 180: return cv2.rotate(image_cv, cv2.ROTATE_180)
     elif angle_degrees == 270: return cv2.rotate(image_cv, cv2.ROTATE_90_COUNTERCLOCKWISE)
-    else: return image_cv # Should not happen with current logic
+    else: return image_cv
 
-# --- Global Page Orientation Correction using Tesseract ---
-def get_global_page_orientation_tesseract(image_bgr, tesseract_lang='ara', dpi=300):
-    print("Attempting global page orientation detection with Tesseract OSD...")
+# --- Global Page Orientation Correction using Tesseract (File-based) ---
+def get_global_page_orientation_tesseract_filebased(image_bgr, 
+                                                    tesseract_lang='ara', 
+                                                    dpi=300, 
+                                                    min_chars_for_osd=15,
+                                                    temp_image_name="temp_osd_page.png"):
+    print("Attempting global page orientation detection with Tesseract OSD (file-based)...")
+    temp_file_path = os.path.join(os.getcwd(), temp_image_name) # Save in current working directory
+    
     try:
-        pil_img = PILImage.fromarray(cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB))
-        osd_data = pytesseract.image_to_string(pil_img, lang=tesseract_lang, config='--psm 0')
+        # Save the OpenCV BGR image to a temporary file
+        cv2.imwrite(temp_file_path, image_bgr)
+        if not os.path.exists(temp_file_path):
+            print(f"Error: Could not write temporary image file to {temp_file_path}")
+            return 0
+
+        #tess_config = f'--psm 0 --dpi {dpi} -c min_characters_to_try={min_chars_for_osd}'
+        #print(f"Using Tesseract config for OSD: {tess_config} on file: {temp_file_path}")
+        
+        # Pass the file path to pytesseract
+        osd_data = pytesseract.image_to_osd(temp_file_path, lang=tesseract_lang, config='--psm 0')
         
         detected_page_orientation = 0 
         for line in osd_data.split('\n'):
@@ -251,13 +265,25 @@ def get_global_page_orientation_tesseract(image_bgr, tesseract_lang='ara', dpi=3
                     print(f"Tesseract OSD detected global page orientation: {detected_page_orientation} degrees.")
                     return detected_page_orientation
                 except ValueError:
-                    print(f"Warning: Could not parse global OSD value: {line}")
+                    print(f"Warning: Could not parse global orientation value from OSD line: {line}")
                     return 0 
+        
         print("Tesseract OSD did not explicitly state 'Orientation in degrees'. Assuming 0.")
         return 0 
-    except Exception as e:
-        print(f"Error during global Tesseract OSD: {e}. Assuming 0 degrees page orientation.")
+        
+    except pytesseract.TesseractError as e:
+        print(f"TesseractError during global OSD (file-based): {e}. Assuming 0 degrees.")
         return 0
+    except Exception as e:
+        print(f"Unexpected error during global Tesseract OSD (file-based): {e}. Assuming 0 degrees.")
+        return 0
+    finally:
+        # Clean up the temporary file
+        if os.path.exists(temp_file_path):
+            try:
+                os.remove(temp_file_path)
+            except Exception as e_rem:
+                print(f"Warning: Could not remove temporary OSD file {temp_file_path}: {e_rem}")
 
 # --- Simple Per-Crop Orientation Correction ---
 def simple_orientation_correction(image_crop_bgr: np.ndarray) -> np.ndarray:
@@ -308,15 +334,15 @@ def get_cropped_image_from_poly(image_bgr, poly_pts):
     if len(remaining_indices) == 2:
         pt1 = poly[remaining_indices[0]]
         pt2 = poly[remaining_indices[1]]
-        if pt1[1] < pt2[1] or (abs(pt1[1] - pt2[1]) < 1e-3 and pt1[0] > pt2[0]): # Check y first, then x for TR
+        if pt1[1] < pt2[1] or (abs(pt1[1] - pt2[1]) < 1e-3 and pt1[0] > pt2[0]): 
             ordered_src_pts[1] = pt1 
             ordered_src_pts[3] = pt2 
         else:
             ordered_src_pts[1] = pt2 
             ordered_src_pts[3] = pt1 
-    else: # Fallback if point ordering fails
-        print("Warning: Polygon point reordering for perspective transform might be incorrect.")
-        ordered_src_pts = poly.astype("float32") # Use original if reordering fails
+    else: 
+        print("Warning: Polygon point reordering for perspective transform might be incorrect. Using as-is.")
+        ordered_src_pts = poly.astype("float32") 
 
     M = cv2.getPerspectiveTransform(ordered_src_pts, dst_pts)
     warped_crop = cv2.warpPerspective(image_bgr, M, (target_w, target_h))
@@ -346,8 +372,12 @@ def main_ocr_pipeline(args):
 
     image_bgr_oriented = image_bgr_input.copy() 
     if args.correct_global_page_orientation: 
-        page_orientation_angle = get_global_page_orientation_tesseract(
-            image_bgr_input, tesseract_lang=args.tesseract_lang, dpi=args.tesseract_dpi
+        page_orientation_angle = get_global_page_orientation_tesseract_filebased( # Using filebased version
+            image_bgr_input, 
+            tesseract_lang=args.tesseract_lang, 
+            dpi=args.tesseract_dpi,
+            min_chars_for_osd=args.tesseract_min_chars_for_global_osd,
+            temp_image_name=f"temp_osd_{base_image_filename}.png" # Unique temp file name
         )
         rotation_to_apply = 0
         if page_orientation_angle == 90: rotation_to_apply = 270 
@@ -441,7 +471,7 @@ def main_ocr_pipeline(args):
                         sequence_confidence_float = token_confidences_tensor.mean().item() 
                 
                 current_sort_key_x = "N/A"
-                if i < len(regions_with_x_coords_for_sort): # Ensure index is valid
+                if i < len(regions_with_x_coords_for_sort): 
                     current_sort_key_x = regions_with_x_coords_for_sort[i][0]
 
                 print_conf_str = f"{sequence_confidence_float:.4f}" if sequence_confidence_float is not None else "N/A"
@@ -503,6 +533,9 @@ if __name__ == '__main__':
     parser.add_argument('--correct_global_page_orientation', action='store_true', help='Enable global page OSD via Tesseract')
     parser.add_argument('--tesseract_lang', type=str, default='ara', help='Language for Tesseract OSD')
     parser.add_argument('--tesseract_dpi', type=int, default=300, help='Assumed DPI for Tesseract OSD')
+    parser.add_argument('--tesseract_min_chars_for_global_osd', type=int, default=15, 
+                        help='Tesseract config: min_characters_to_try for global page OSD')
+
 
     parser.add_argument('--use_simple_orientation', action='store_true', help='Enable simple aspect-ratio per-crop orientation correction')
     parser.add_argument('--save_debug_crops', action='store_true', help='Save intermediate cropped images')
