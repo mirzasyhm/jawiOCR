@@ -342,19 +342,55 @@ def main_ocr_pipeline(args):
     )
     print(f"CRAFT detected {len(detected_polys_from_craft)} potential text regions.")
 
+        # >>> STAGE: Sort Detected Regions for Right-to-Left Reading Order <<<
+    if detected_polys_from_craft:
+        # Create a list of tuples: (representative_x_coordinate, polygon_data)
+        # We'll use the centroid's x-coordinate for sorting.
+        # Or, you could use the minimum x-coordinate of the polygon (leftmost point of the box)
+        # or maximum x-coordinate (rightmost point of the box).
+        # For right-to-left, we want to sort by the rightmost extent, or centroid.
+        
+        regions_with_x_coords = []
+        for poly_pts in detected_polys_from_craft:
+            if poly_pts is not None and len(poly_pts) > 0:
+                # Calculate centroid x-coordinate
+                moments = cv2.moments(poly_pts.astype(np.int32)) # moments need int points
+                if moments["m00"] != 0:
+                    center_x = int(moments["m10"] / moments["m00"])
+                else: # Fallback if moments are zero (e.g., very thin line)
+                    center_x = int(np.mean(poly_pts[:, 0])) # Mean of x-coordinates
+                
+                # Alternative: use the maximum x-coordinate (rightmost point of the polygon)
+                # max_x = int(np.max(poly_pts[:, 0]))
+                # regions_with_x_coords.append((max_x, poly_pts))
+                
+                regions_with_x_coords.append((center_x, poly_pts))
+
+        # Sort by the x-coordinate in descending order (rightmost first)
+        # If two boxes have similar x-centroids (e.g. stacked vertically),
+        # you might add a secondary sort key (e.g., y-coordinate) if needed,
+        # but for simple lines of text, x-sorting is usually sufficient.
+        regions_with_x_coords.sort(key=lambda item: item[0], reverse=True)
+        
+        # Get the sorted polygons
+        sorted_detected_polys = [item[1] for item in regions_with_x_coords]
+        print(f"Regions sorted for right-to-left processing: {len(sorted_detected_polys)} regions.")
+    else:
+        sorted_detected_polys = []
+
     results = []
     output_image_viz = image_bgr_original.copy()
+    recognized_text_snippets = []
 
-    for i, poly_pts in enumerate(detected_polys_from_craft):
+    for i, poly_pts in enumerate(sorted_detected_polys):
         if poly_pts is None: continue
 
         cropped_bgr = get_cropped_image_from_poly(image_bgr_original, poly_pts)
-        
         if cropped_bgr is None or cropped_bgr.shape[0] == 0 or cropped_bgr.shape[1] == 0:
-            print(f"Warning: Skipping invalid crop for polygon {i+1}"); continue
+            print(f"Warning: Skipping invalid crop for sorted region {i+1}"); continue
 
         if args.save_debug_crops:
-            original_crop_filename = f"{base_image_filename}_region_{i+1}_original_crop.png"
+            original_crop_filename = f"{base_image_filename}_sorted_region_{i+1}_original_crop.png"
             original_crop_filepath = os.path.join(debug_output_dir, original_crop_filename)
             try: cv2.imwrite(original_crop_filepath, cropped_bgr)
             except Exception as e: print(f"Error saving original crop {original_crop_filepath}: {e}")
@@ -364,14 +400,14 @@ def main_ocr_pipeline(args):
             corrected_bgr_crop = simple_orientation_correction(cropped_bgr)
             crop_for_parseq = corrected_bgr_crop 
             if args.save_debug_crops and corrected_bgr_crop is not cropped_bgr:
-                corrected_crop_filename = f"{base_image_filename}_region_{i+1}_simple_corrected_crop.png"
+                corrected_crop_filename = f"{base_image_filename}_sorted_region_{i+1}_simple_corrected_crop.png"
                 corrected_crop_filepath = os.path.join(debug_output_dir, corrected_crop_filename)
                 try: cv2.imwrite(corrected_crop_filepath, crop_for_parseq)
                 except Exception as e: print(f"Error saving simple corrected crop {corrected_crop_filepath}: {e}")
         
         parseq_input_tensor = preprocess_for_parseq_strhub(crop_for_parseq, parseq_img_transform, device)
         if parseq_input_tensor is None:
-            print(f"Warning: Skipping region {i+1} (Parseq preprocess failed)."); continue
+            print(f"Warning: Skipping sorted region {i+1} (Parseq preprocess failed)."); continue
 
         with torch.no_grad():
             logits = parseq_model(parseq_input_tensor)
@@ -379,7 +415,7 @@ def main_ocr_pipeline(args):
             pred_texts, pred_confs_tensors_list = parseq_model.tokenizer.decode(probabilities)
             
             if pred_texts and len(pred_texts) > 0:
-                recognized_text = pred_texts[0] 
+                recognized_text_segment = pred_texts[0] 
                 token_confidences_tensor = pred_confs_tensors_list[0] if pred_confs_tensors_list and len(pred_confs_tensors_list) > 0 else None
                 sequence_confidence_float = None
                 if token_confidences_tensor is not None and isinstance(token_confidences_tensor, torch.Tensor):
@@ -389,29 +425,49 @@ def main_ocr_pipeline(args):
                         sequence_confidence_float = token_confidences_tensor.mean().item() 
                 
                 print_conf_str = f"{sequence_confidence_float:.4f}" if sequence_confidence_float is not None else "N/A"
-                print(f"Region {i+1}: Text = '{recognized_text}', Conf = {print_conf_str}")
-                results.append({'polygon': poly_pts, 'text': recognized_text, 'confidence': sequence_confidence_float})
+                print(f"Sorted Region {i+1} (Original X: {regions_with_x_coords[i][0]}): Text = '{recognized_text_segment}', Conf = {print_conf_str}")
+                
+                # Store data for later, including original x-coordinate for verification if needed
+                results_data.append({
+                    'original_x': regions_with_x_coords[i][0], # Centroid X used for sorting
+                    'polygon': poly_pts, 
+                    'text': recognized_text_segment, 
+                    'confidence': sequence_confidence_float
+                })
+                recognized_text_snippets.append(recognized_text_segment) # Add to list in R-L order
+                
                 cv2.polylines(output_image_viz, [poly_pts.astype(np.int32)], True, (0,0,255), 2) 
             else:
-                print(f"Warning: No text decoded from Parseq for region {i+1}")
+                print(f"Warning: No text decoded from Parseq for sorted region {i+1}")
     
+    # --- Construct the final right-to-left sentence ---
+    # Since we processed snippets from right to left, join them in that order.
+    # For Jawi, words are typically space-separated.
+    final_right_to_left_text = " ".join(recognized_text_snippets)
+    print(f"\nFinal Combined Right-to-Left Text: {final_right_to_left_text}\n")
+
+    # 6. Save results
     if args.output_dir:
         if not os.path.exists(args.output_dir): os.makedirs(args.output_dir)
         viz_filepath = os.path.join(args.output_dir, f"res_ocr_{base_image_filename}.jpg")
         cv2.imwrite(viz_filepath, output_image_viz)
         print(f"Visualized OCR result saved to: {viz_filepath}")
+        
         text_result_filepath = os.path.join(args.output_dir, f"res_ocr_{base_image_filename}.txt")
         with open(text_result_filepath, 'w', encoding='utf-8') as f:
-            for res in results:
+            f.write(f"Final Combined Text (Right-to-Left): {final_right_to_left_text}\n\n")
+            f.write("Individual Region Detections (Sorted Right-to-Left):\n")
+            for res_item in results_data: # Iterate through the collected data
                 poly_str = ""
-                if res['polygon'] is not None:
-                    try: # Handle potential non-iterable or improperly structured polygons
-                        poly_str = ";".join([f"{int(p[0])},{int(p[1])}" for p in res['polygon']])
+                if res_item['polygon'] is not None:
+                    try: 
+                        poly_str = ";".join([f"{int(p[0])},{int(p[1])}" for p in res_item['polygon']])
                     except TypeError:
                         poly_str = "Error_parsing_polygon"
-                conf_str = f"{res['confidence']:.4f}" if res['confidence'] is not None else "N/A"
-                f.write(f"Polygon: [{poly_str}] | Text: {res['text']} | Confidence: {conf_str}\n")
+                conf_str = f"{res_item['confidence']:.4f}" if res_item['confidence'] is not None else "N/A"
+                f.write(f"Original_X_Sort_Key: {res_item['original_x']} | Polygon: [{poly_str}] | Text: {res_item['text']} | Confidence: {conf_str}\n")
         print(f"Text OCR results saved to: {text_result_filepath}")
+        
     print("OCR pipeline finished.")
 
 if __name__ == '__main__':
