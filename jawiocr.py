@@ -271,7 +271,7 @@ def correct_orientation_tesseract(image_crop_bgr, tesseract_lang='ara', min_heig
     UPSCALE_THRESHOLD_H = 50 # Example: if height is less than this, consider upscaling
     UPSCALE_THRESHOLD_W = 50 # Example
     UPSCALE_FACTOR = 1.5 # Example: upscale by 50%
-
+    new_w = 0, new_h = 0
     temp_crop_for_osd = image_crop_bgr.copy()
     if h < UPSCALE_THRESHOLD_H or w < UPSCALE_THRESHOLD_W:
     # print(f"Small crop (h:{h}, w:{w}). Upscaling by {UPSCALE_FACTOR}x for OSD attempt.")
