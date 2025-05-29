@@ -465,6 +465,25 @@ def get_cropped_image_from_poly(image_bgr, poly_pts):
         
     return warped_crop
 
+def simple_orientation_correction(image_crop_bgr: np.ndarray) -> np.ndarray:
+    """
+    Corrects orientation of a text crop based on its width and height.
+    If width < height, it's assumed to be vertically oriented and is
+    rotated 90 degrees clockwise to make it horizontal.
+    """
+    if image_crop_bgr is None or image_crop_bgr.shape[0] == 0 or image_crop_bgr.shape[1] == 0:
+        return image_crop_bgr # Or handle as an error/None
+
+    h, w = image_crop_bgr.shape[:2]
+
+    if w < h: # If width is less than height, assume it's vertical text
+        # print(f"Simple OSD: Crop h={h}, w={w}. Rotating 90 deg clockwise.")
+        # Rotate 90 degrees clockwise
+        corrected_image = cv2.rotate(image_crop_bgr, cv2.ROTATE_90_CLOCKWISE)
+        return corrected_image
+    else:
+        # print(f"Simple OSD: Crop h={h}, w={w}. Assuming horizontal, no rotation.")
+        return image_crop_bgr # Assume horizontal, no rotation needed
 
 # --- Main OCR Pipeline ---
 def main_ocr_pipeline(args):
@@ -523,44 +542,34 @@ def main_ocr_pipeline(args):
             print(f"Warning: Skipping invalid crop for polygon {i+1}")
             continue
 
-        # --- Save the initial cropped image (before orientation correction) ---
-        if args.save_debug_crops:
+        # --- Save the initial cropped image (before orientation correction) if debug is on ---
+        if args.save_debug_crops: # Assuming you have this arg
             original_crop_filename = f"{base_image_filename}_region_{i+1}_original_crop.png"
-            original_crop_filepath = os.path.join(debug_output_dir, original_crop_filename)
+            original_crop_filepath = os.path.join(debug_output_dir, original_crop_filename) # debug_output_dir needs to be defined
             try:
                 cv2.imwrite(original_crop_filepath, cropped_bgr)
-                print(f"Saved original detected region {i+1} to: {original_crop_filepath}")
+                # print(f"Saved original detected region {i+1} to: {original_crop_filepath}")
             except Exception as e_imwrite:
                 print(f"Error saving original crop {original_crop_filepath}: {e_imwrite}")
 
 
-        # >>> STAGE: Orientation Correction (using Tesseract if enabled) <<<
+        # >>> STAGE: Simple Orientation Correction <<<
         crop_for_parseq = cropped_bgr 
-        if args.use_tesseract_orientation:
-            # Use the parameters from args for min_height/width etc.
-            corrected_bgr_crop = correct_orientation_tesseract(
-                cropped_bgr, 
-                tesseract_lang=args.tesseract_lang,
-                min_orig_h_for_osd=args.tesseract_min_orig_h_for_osd, # Make sure these are in args
-                min_orig_w_for_osd=args.tesseract_min_orig_w_for_osd, # Make sure these are in args
-                upscale_factor=args.tesseract_osd_upscale_factor, # Make sure these are in args
-                dpi_for_tesseract=args.tesseract_dpi # Make sure these are in args
-            )
-            if corrected_bgr_crop is not None:
-                crop_for_parseq = corrected_bgr_crop
+        if args.use_simple_orientation: # Add a new argument to control this
+            corrected_bgr_crop = simple_orientation_correction(cropped_bgr)
+            # simple_orientation_correction should always return an image
+            crop_for_parseq = corrected_bgr_crop 
 
-                # --- Save the orientation-corrected crop image ---
-                if args.save_debug_crops and corrected_bgr_crop is not cropped_bgr: # Save only if changed
-                    corrected_crop_filename = f"{base_image_filename}_region_{i+1}_corrected_crop.png"
-                    corrected_crop_filepath = os.path.join(debug_output_dir, corrected_crop_filename)
-                    try:
-                        cv2.imwrite(corrected_crop_filepath, crop_for_parseq) # Save crop_for_parseq as it's the final version
-                        print(f"Saved orientation-corrected region {i+1} to: {corrected_crop_filepath}")
-                    except Exception as e_imwrite_corr:
-                         print(f"Error saving corrected crop {corrected_crop_filepath}: {e_imwrite_corr}")
+            # --- Save the orientation-corrected crop image if debug is on and if it changed ---
+            if args.save_debug_crops and corrected_bgr_crop is not cropped_bgr:
+                corrected_crop_filename = f"{base_image_filename}_region_{i+1}_simple_corrected_crop.png"
+                corrected_crop_filepath = os.path.join(debug_output_dir, corrected_crop_filename)
+                try:
+                    cv2.imwrite(corrected_crop_filepath, crop_for_parseq)
+                    # print(f"Saved simple orientation-corrected region {i+1} to: {corrected_crop_filepath}")
+                except Exception as e_imwrite_corr:
+                     print(f"Error saving simple corrected crop {corrected_crop_filepath}: {e_imwrite_corr}")
 
-            else: # Should not happen if correct_orientation_tesseract always returns an image
-                print(f"Warning: Tesseract orientation correction returned None for region {i+1}, using original.")
         # >>> STAGE: Text Recognition (Parseq) <<<
         parseq_input_tensor = preprocess_for_parseq_strhub(crop_for_parseq, parseq_img_transform, device)
         if parseq_input_tensor is None:
@@ -625,11 +634,8 @@ if __name__ == '__main__':
     parser.add_argument('--canvas_size', default=1280, type=int, help='CRAFT image size for inference')
     parser.add_argument('--mag_ratio', default=1.5, type=float, help='CRAFT image magnification ratio')
     parser.add_argument('--poly', default=False, action='store_true', help='CRAFT enable polygon type detection (outputs quadrilateral)')
-    # Tesseract Orientation
-    parser.add_argument('--use_tesseract_orientation', action='store_true', help='Enable orientation correction using Tesseract OSD')
-    parser.add_argument('--tesseract_lang', type=str, default='ara', help='Language for Tesseract OSD (e.g., "ara", "ara+fas")')
-    parser.add_argument('--tesseract_min_crop_height', type=int, default=25, help='Min crop height for attempting Tesseract OSD')
-    parser.add_argument('--tesseract_min_crop_width', type=int, default=25, help='Min crop width for attempting Tesseract OSD')
+    # Add new argument for simple orientation correction
+    parser.add_argument('--use_simple_orientation', action='store_true', help='Enable simple aspect-ratio based orientation correction (rotates if W < H)')
         # --- Add new argument for controlling debug crop saving ---
     parser.add_argument('--save_debug_crops', action='store_true', help='Save intermediate cropped images for debugging')
     # General
