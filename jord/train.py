@@ -7,7 +7,7 @@ from tensorflow.keras import mixed_precision
 from tensorflow.keras.applications.resnet50 import preprocess_input as resnet50_preprocess_input
 
 from data_preprocessing import create_datasets
-from cnn import create_resnet50_model # Updated import
+from cnn import create_resnet50_model # Assuming cnn.py has create_resnet50_model
 
 # --- Configuration Parameters for ResNet50 ---
 IMG_WIDTH = 224
@@ -19,7 +19,7 @@ INITIAL_EPOCHS = 2
 FINE_TUNE_EPOCHS = 2
 LEARNING_RATE = 0.001
 FINE_TUNE_LR = 0.00001
-FINE_TUNE_AT_LAYERS = 20 # Number of layers from the end of ResNet50 to unfreeze.
+FINE_TUNE_AT_LAYERS = 20
 
 policy = mixed_precision.Policy('mixed_float16')
 mixed_precision.set_global_policy(policy)
@@ -27,14 +27,13 @@ print(f"Using mixed precision policy: {policy.name}")
 
 BASE_DIR = 'jawi_orientation_dataset'
 TRAIN_DIR = os.path.join(BASE_DIR, 'train')
-VALIDATION_DIR = os.path.join(BASE_DIR, 'validation')
+VALIDATION_DIR = os.path.join(BASE_DIR, 'val')
 TEST_DIR = os.path.join(BASE_DIR, 'test')
 
 MODEL_SAVE_PATH = 'jawi_orientation_resnet50.keras'
 BEST_MODEL_SAVE_PATH = 'best_jawi_orientation_resnet50.keras'
 
 def main():
-    # ... (GPU setup and directory checks remain the same) ...
     print(f"TensorFlow version: {tf.__version__}")
     gpus = tf.config.list_physical_devices('GPU')
     if gpus:
@@ -51,28 +50,34 @@ def main():
         print(f"Error: Training or validation directory not found.")
         return
 
-    INPUT_SHAPE = (IMG_HEIGHT, IMG_WIDTH, 3)
+    INPUT_SHAPE = (IMG_HEIGHT, IMG_WIDTH, 3) # RGB images
     test_dir_to_pass = TEST_DIR if os.path.exists(TEST_DIR) and os.listdir(TEST_DIR) else None
 
     train_ds, val_ds, test_ds, class_names_loaded = create_datasets(
         IMAGE_SIZE, BATCH_SIZE, TRAIN_DIR, VALIDATION_DIR, test_dir_to_pass
     )
     
-    def unscale_and_preprocess_resnet(image, label):
-        image = image * 255.0
+    # Apply ResNet50 specific preprocessing.
+    # Images are now directly from image_dataset_from_directory in [0, 255] range.
+    def preprocess_for_resnet(image, label):
+        # image is already tf.float32 in [0, 255] from image_dataset_from_directory
         return resnet50_preprocess_input(image), label
 
-    train_ds = train_ds.map(unscale_and_preprocess_resnet, num_parallel_calls=tf.data.AUTOTUNE).prefetch(tf.data.AUTOTUNE)
-    val_ds = val_ds.map(unscale_and_preprocess_resnet, num_parallel_calls=tf.data.AUTOTUNE).prefetch(tf.data.AUTOTUNE)
+    train_ds = train_ds.map(preprocess_for_resnet, num_parallel_calls=tf.data.AUTOTUNE)
+    val_ds = val_ds.map(preprocess_for_resnet, num_parallel_calls=tf.data.AUTOTUNE)
     if test_ds:
-        test_ds = test_ds.map(unscale_and_preprocess_resnet, num_parallel_calls=tf.data.AUTOTUNE).prefetch(tf.data.AUTOTUNE)
+        test_ds = test_ds.map(preprocess_for_resnet, num_parallel_calls=tf.data.AUTOTUNE)
+    
+    # Re-apply prefetch after mapping
+    train_ds = train_ds.prefetch(buffer_size=tf.data.AUTOTUNE)
+    val_ds = val_ds.prefetch(buffer_size=tf.data.AUTOTUNE)
+    if test_ds:
+      test_ds = test_ds.prefetch(buffer_size=tf.data.AUTOTUNE)
 
     actual_num_classes = len(class_names_loaded)
     print(f"Loaded class names: {class_names_loaded}, Num classes: {actual_num_classes}")
 
     print("\n--- Phase 1: Training Top Layers ---")
-    # For Phase 1, fine_tune_at=0 is passed to create_resnet50_model
-    # which sets base_model.trainable = False inside that function.
     model = create_resnet50_model(INPUT_SHAPE, actual_num_classes, fine_tune_at=0)
     model.summary()
 
@@ -102,70 +107,57 @@ def main():
     if FINE_TUNE_AT_LAYERS > 0 and FINE_TUNE_EPOCHS > 0:
         print("\n--- Phase 2: Fine-tuning ResNet50 Base Layers ---")
         
-        # --- CORRECTED SECTION for accessing the ResNet50 base model ---
-        # The ResNet50 model loaded from applications is typically the first layer
-        # that is *not* an InputLayer when you build your `model` using the functional API like:
-        # `Model(inputs=base_model.input, outputs=predictions)`
-        # We need to find this actual ResNet50 model instance within our `model`.
-        
-        # Find the ResNet50 base model layer within the `model`
-        # This assumes the ResNet50 application model is one of the direct layers of `model`.
-        # If `create_resnet50_model` directly returns the model where ResNet50 is the core,
-        # then `model.layers[0]` if InputLayer is not explicit, or `model.layers[1]` if it is,
-        # might point to the ResNet50 instance.
-        # A more robust way is to name the ResNet50 base model when creating it in cnn.py
-        # and then retrieve it by name.
-        
-        # Let's assume `create_resnet50_model` in `cnn.py` was:
-        # base_model = ResNet50(..., name="resnet50_base")
-        # ...
-        # model = Model(inputs=base_model.input, ...)
-        # Then we can do:
-        # resnet_base_for_tuning = model.get_layer("resnet50_base")
-
-        # For now, let's try to get it by assuming its position or type.
-        # `model.layers` will list the layers of your *overall* model.
-        # One of these layers *is* the ResNet50 base.
         resnet_base_for_tuning = None
         for layer_in_model in model.layers:
-            if layer_in_model.name == 'resnet50': # Default name for ResNet50 from tf.keras.applications
+            # Default name for ResNet50 from tf.keras.applications is 'resnet50'
+            # Or, if you named it in cnn.py (e.g., name="resnet50_base_application_model") use that name.
+            if layer_in_model.name == 'resnet50': # Check for default name
                 resnet_base_for_tuning = layer_in_model
                 break
+            # Alternative check if you used a custom name like "resnet50_base_application_model"
+            # elif layer_in_model.name == "resnet50_base_application_model":
+            #     resnet_base_for_tuning = layer_in_model
+            #     break
         
         if resnet_base_for_tuning is None:
-            print("Error: Could not find the ResNet50 base model layer for fine-tuning.")
-            # Fallback or exit if not found
-        else:
+            print("Error: Could not find the ResNet50 base model layer for fine-tuning by common names.")
+            # Attempt to get the base model assuming it's the second layer (after InputLayer if functional API was built that way)
+            # This is less robust; naming the layer in cnn.py is preferred.
+            if len(model.layers) > 1 and isinstance(model.layers[1], tf.keras.Model) and "resnet" in model.layers[1].name.lower():
+                print("Attempting to use model.layers[1] as ResNet base.")
+                resnet_base_for_tuning = model.layers[1]
+            else:
+                print("Could not reliably identify ResNet base layer. Skipping fine-tuning.")
+
+        if resnet_base_for_tuning: # Proceed only if found
             print(f"Found ResNet50 base layer for fine-tuning: {resnet_base_for_tuning.name}")
-            resnet_base_for_tuning.trainable = True # Make the whole ResNet50 block trainable
+            resnet_base_for_tuning.trainable = True
             
-            # Freeze all layers within the ResNet50 base model initially
             for layer in resnet_base_for_tuning.layers:
-                layer.trainable = False
+                layer.trainable = False # Freeze all first
             
-            # Unfreeze layers from `FINE_TUNE_AT_LAYERS` onwards (from the top of ResNet50)
             if FINE_TUNE_AT_LAYERS > 0 and FINE_TUNE_AT_LAYERS <= len(resnet_base_for_tuning.layers):
-                print(f"Fine-tuning ResNet50: Unfreezing top {FINE_TUNE_AT_LAYERS} layers of the base model for fine-tuning.")
+                print(f"Unfreezing top {FINE_TUNE_AT_LAYERS} layers of the ResNet50 base model.")
                 for layer_idx in range(len(resnet_base_for_tuning.layers) - FINE_TUNE_AT_LAYERS, len(resnet_base_for_tuning.layers)):
                     layer_to_unfreeze = resnet_base_for_tuning.layers[layer_idx]
                     if not isinstance(layer_to_unfreeze, tf.keras.layers.BatchNormalization):
                         layer_to_unfreeze.trainable = True
                     else:
-                        print(f"Keeping BatchNormalization layer {layer_to_unfreeze.name} frozen during fine-tuning.")
+                        print(f"Keeping BatchNormalization layer {layer_to_unfreeze.name} frozen.")
             elif FINE_TUNE_AT_LAYERS > len(resnet_base_for_tuning.layers):
-                 print(f"Warning: FINE_TUNE_AT_LAYERS ({FINE_TUNE_AT_LAYERS}) is greater than total layers in ResNet50 base ({len(resnet_base_for_tuning.layers)}). Unfreezing all non-BN layers in base.")
+                 print(f"Warning: FINE_TUNE_AT_LAYERS too large. Unfreezing all non-BN layers in ResNet base.")
                  for layer_to_unfreeze in resnet_base_for_tuning.layers:
                      if not isinstance(layer_to_unfreeze, tf.keras.layers.BatchNormalization):
                         layer_to_unfreeze.trainable = True
-            else: # FINE_TUNE_AT_LAYERS is 0 or invalid
-                print("Warning: FINE_TUNE_AT_LAYERS is 0 or invalid. No layers in ResNet50 base will be unfrozen for fine-tuning.")
+            else:
+                print("Warning: FINE_TUNE_AT_LAYERS is 0. No layers in ResNet base will be unfrozen.")
 
             model.compile(
                 optimizer=tf.keras.optimizers.Adam(learning_rate=FINE_TUNE_LR),
                 loss='sparse_categorical_crossentropy',
                 metrics=['accuracy']
             )
-            model.summary() # Show summary again
+            model.summary()
 
             callbacks_list_phase2 = [
                 ModelCheckpoint(filepath=BEST_MODEL_SAVE_PATH, save_best_only=True, monitor='val_accuracy', mode='max', verbose=1),
@@ -185,8 +177,12 @@ def main():
             for key in history_phase1.history:
                 history_phase1.history[key].extend(history_phase2.history[key])
             history = history_phase1
-    else:
-        print("\nSkipping fine-tuning phase.")
+        else: # resnet_base_for_tuning was not found
+             print("Skipping fine-tuning phase as ResNet base layer was not identified.")
+             history = history_phase1 # Use only phase 1 history
+
+    else: # FINE_TUNE_AT_LAYERS is 0 or FINE_TUNE_EPOCHS is 0
+        print("\nSkipping fine-tuning phase based on configuration.")
         history = history_phase1
 
     # ... (rest of the saving, plotting, and evaluation code remains the same) ...
@@ -227,7 +223,6 @@ def main():
         test_loss, test_accuracy = model.evaluate(test_ds)
         print(f"Test Loss: {test_loss:.4f}")
         print(f"Test Accuracy: {test_accuracy:.4f}")
-
 
 if __name__ == '__main__':
     main()
