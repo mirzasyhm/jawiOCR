@@ -345,73 +345,124 @@ def correct_orientation_tesseract(image_crop_bgr,
 
 # --- Cropping Utility ---
 def get_cropped_image_from_poly(image_bgr, poly_pts):
-    """Crops an image region defined by a polygon (4 points) using perspective transform."""
-    if poly_pts is None or len(poly_pts) < 3: return None
+    """
+    Crops an image region defined by a polygon (4 points) using perspective transform,
+    aiming to preserve the original resolution of the text region.
+    """
+    if poly_pts is None or len(poly_pts) < 4: # Need 4 points for a quadrilateral
+        print("Warning: get_cropped_image_from_poly received less than 4 points.")
+        return None
+    
     poly = np.array(poly_pts, dtype=np.float32)
-    
-    # Get the minimum area rectangle for the polygon
-    rect = cv2.minAreaRect(poly) # ((center_x, center_y), (width, height), angle)
-    
-    # Get the 4 corner points of the rotated rectangle
-    box = cv2.boxPoints(rect) # Note: order might not be TL, TR, BR, BL
-    
-    # Get width and height from the rotated rectangle
-    # rect[1][0] is width, rect[1][1] is height as per OpenCV docs for minAreaRect
-    # Angle also determines which is width and which is height visually
-    width = int(rect[1][0])
-    height = int(rect[1][1])
-    angle = rect[2] # Angle is in [-90, 0)
 
-    # Handle cases where width and height might be swapped by minAreaRect
-    # if angle is close to -90 (e.g. text is vertical), width and height from rect[1] might be swapped
-    # compared to visual expectation if we want "text width" and "text height".
-    # For warping, it's often better to ensure maxWidth corresponds to the longest side of the text.
+    # Calculate the width and height of the text region more accurately
+    # Assuming poly_pts are ordered (e.g., TL, TR, BR, BL or a consistent order from CRAFT)
+    # Width: average of top and bottom edge lengths
+    # Height: average of left and right edge lengths
     
-    # For simplicity in warping, we want the "text line" to be horizontal in the crop.
-    # If angle indicates the box is more vertical than horizontal, swap width and height for destination.
-    if angle < -45: # Typically means height > width from rect[1] for horizontal text
-        actual_width, actual_height = height, width
-    else:
-        actual_width, actual_height = width, height
+    # Example for TL, TR, BR, BL order:
+    # tl, tr, br, bl = poly[0], poly[1], poly[2], poly[3]
+    # width1 = np.linalg.norm(tr - tl)
+    # width2 = np.linalg.norm(br - bl)
+    # text_region_width = int((width1 + width2) / 2.0)
+    # height1 = np.linalg.norm(bl - tl)
+    # height2 = np.linalg.norm(br - tr)
+    # text_region_height = int((height1 + height2) / 2.0)
 
-    if actual_width == 0 or actual_height == 0: return None
+    # A more robust way using minAreaRect to get an idea of dimensions,
+    # but ensuring we don't shrink if the box is highly skewed.
+    rect = cv2.minAreaRect(poly)  # ((center_x, center_y), (width, height), angle)
+    box_corners = cv2.boxPoints(rect) # Get the 4 corners of this bounding box
+
+    # The dimensions from rect[1] are of the bounding box.
+    # We want the dimensions of the warped *target* image.
+    # Let's use the longer side of the minAreaRect as the target width,
+    # and the shorter side as the target height for a horizontal text line.
+    # This preserves aspect ratio better.
+    
+    w_rect, h_rect = rect[1] # width and height of the minAreaRect
+    angle = rect[2]
+
+    # Determine the "visual" width and height of the text line
+    # If the angle is steep (e.g. text is vertical or highly slanted),
+    # w_rect and h_rect from minAreaRect might not directly correspond to
+    # text line width and height.
+    # For simplicity, let's ensure the output patch has dimensions
+    # that capture the extent of the polygon.
+    
+    # Calculate width and height based on the bounding box of the *original polygon*
+    # This gives a simpler, axis-aligned bounding box first.
+    x_coords = poly[:, 0]
+    y_coords = poly[:, 1]
+    xmin, xmax = np.min(x_coords), np.max(x_coords)
+    ymin, ymax = np.min(y_coords), np.max(y_coords)
+    
+    # Desired width and height of the output *straightened* patch.
+    # These should ideally reflect the actual pixel span of the text.
+    # Using the minAreaRect dimensions is generally a good start if the text isn't extremely skewed.
+    # If angle suggests vertical text, swap w_rect and h_rect for target output
+    if abs(angle) > 45: # More vertical than horizontal
+        target_w = int(h_rect)
+        target_h = int(w_rect)
+    else: # More horizontal
+        target_w = int(w_rect)
+        target_h = int(h_rect)
+
+    if target_w <= 0 or target_h <= 0:
+        # print(f"Warning: Invalid target dimensions for crop: w={target_w}, h={target_h}. Using bounding rect of poly.")
+        # Fallback to simple bounding rect of the original polygon if minAreaRect gives zero dims
+        target_w = int(xmax - xmin)
+        target_h = int(ymax - ymin)
+        if target_w <= 0 or target_h <= 0:
+            # print("Warning: Fallback also resulted in zero/negative dim. Skipping crop.")
+            return None
+
 
     # Destination points for a straightened rectangle
+    # Order: TL, TR, BR, BL (standard for many image processing tasks)
     dst_pts = np.array([
-        [0, actual_height - 1],
-        [0, 0],
-        [actual_width - 1, 0],
-        [actual_width - 1, actual_height - 1]
+        [0, 0],                    # Top-left
+        [target_w - 1, 0],         # Top-right
+        [target_w - 1, target_h - 1],# Bottom-right
+        [0, target_h - 1]          # Bottom-left
     ], dtype="float32")
 
-    # Source points (the detected polygon corners)
-    # We need to order src_pts (box) to match dst_pts: BL, TL, TR, BR
-    # Sum (x+y) is min for TL, max for BR. Diff (y-x) is min for TR, max for BL (for image coords)
-    s = box.sum(axis=1)
-    diff = np.diff(box, axis=1).reshape(-1) # y-x for each point relative to the next, needs care
-    
-    # A simpler way to order for perspective transform:
-    # Identify TL, TR, BL, BR from the `box` points (which are from minAreaRect)
-    # This part can be tricky. minAreaRect does not guarantee order.
-    # We can use the provided poly_pts if its order is consistent (e.g. TL, TR, BR, BL)
-    # If poly_pts from CRAFT is already in a consistent order:
-    src_pts = poly.astype("float32")
-    # Otherwise, re-order `box` (corners from minAreaRect)
-    # Example reordering (assuming image coordinates where y increases downwards):
-    # tl = box[np.argmin(s)]
-    # br = box[np.argmax(s)]
-    # temp_pts = np.array([p for p in box if not np.all(p == tl) and not np.all(p == br)])
-    # if temp_pts[0][0] > temp_pts[1][0]: # if x of first is greater, it's TR
-    #     tr = temp_pts[0]; bl = temp_pts[1]
+    # Source points (the detected polygon corners from CRAFT)
+    # Ensure poly_pts are in a consistent order (e.g., TL, TR, BR, BL)
+    # If CRAFT provides them in a different order, you might need to re-order them here.
+    # For now, assuming poly_pts are already in an order that matches the conceptual dst_pts.
+    src_pts = poly.astype("float32") 
+
+    # If poly_pts from CRAFT are not guaranteed to be TL, TR, BR, BL,
+    # you need to re-order them to match dst_pts. One common way:
+    # s = src_pts.sum(axis=1)
+    # ordered_src_pts = np.zeros((4, 2), dtype="float32")
+    # ordered_src_pts[0] = src_pts[np.argmin(s)] # Top-left has smallest sum
+    # ordered_src_pts[2] = src_pts[np.argmax(s)] # Bottom-right has largest sum
+    # diff = np.diff(src_pts, axis=1) # computes y-x for each, need to be careful with interpretation
+    # # A common method is to find the remaining two points and assign them based on their x or y values
+    # remaining_pts = np.array([p for i, p in enumerate(src_pts) if i not in [np.argmin(s), np.argmax(s)]])
+    # if remaining_pts.size == 4: # Should be 2 points, 2 coords each
+    #     if remaining_pts[0,1] < remaining_pts[1,1]: # Point with smaller y is TR (assuming TL is already found)
+    #         ordered_src_pts[1] = remaining_pts[0]
+    #         ordered_src_pts[3] = remaining_pts[1]
+    #     else:
+    #         ordered_src_pts[1] = remaining_pts[1]
+    #         ordered_src_pts[3] = remaining_pts[0]
+    #     src_pts = ordered_src_pts # Use the re-ordered points
     # else:
-    #     tr = temp_pts[1]; bl = temp_pts[0]
-    # src_pts = np.array([bl, tl, tr, br], dtype="float32") # Match dst_pts order for warpPerspective
+    #     print("Warning: Could not re-order source points for perspective transform. Using as is.")
+
 
     # The perspective transformation matrix
     M = cv2.getPerspectiveTransform(src_pts, dst_pts)
-    # Directly warp the rotated rectangle to get the straightened rectangle
-    warped_crop = cv2.warpPerspective(image_bgr, M, (actual_width, actual_height))
+    # Warp the image
+    warped_crop = cv2.warpPerspective(image_bgr, M, (target_w, target_h))
     
+    if warped_crop.shape[0] == 0 or warped_crop.shape[1] == 0:
+        # print(f"Warning: Warped crop has zero dimension. Original target_w={target_w}, target_h={target_h}")
+        return None
+        
     return warped_crop
 
 
