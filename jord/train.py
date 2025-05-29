@@ -13,10 +13,10 @@ from cnn import create_resnet50_model # This now returns (model, base_model_inst
 IMG_WIDTH = 224
 IMG_HEIGHT = 224
 IMAGE_SIZE = (IMG_HEIGHT, IMG_WIDTH)
-BATCH_SIZE = 64
+BATCH_SIZE = 256
 NUM_CLASSES = 4
-INITIAL_EPOCHS = 2
-FINE_TUNE_EPOCHS = 2
+INITIAL_EPOCHS = 15
+FINE_TUNE_EPOCHS = 15
 LEARNING_RATE = 0.001
 FINE_TUNE_LR = 0.00001
 FINE_TUNE_AT_LAYERS = 20 # Number of layers from the END of ResNet50 base to unfreeze

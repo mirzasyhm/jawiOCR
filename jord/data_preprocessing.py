@@ -6,7 +6,7 @@ import os
 
 IMG_WIDTH = 224  # Default, will be overridden by training.py for ResNet50
 IMG_HEIGHT = 224 # Default, will be overridden by training.py for ResNet50
-BATCH_SIZE = 32
+BATCH_SIZE = 256
 NUM_CLASSES = 4
 
 def create_datasets(img_size, batch_size, train_dir_path, val_dir_path, test_dir_path=None):
