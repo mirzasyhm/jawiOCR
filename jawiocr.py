@@ -9,6 +9,7 @@ import torch.backends.cudnn as cudnn
 from collections import OrderedDict
 from PIL import Image as PILImage
 from torchvision import transforms as TorchTransforms
+import pytesseract # For global page OSD
 
 # --- Path Setup ---
 current_script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -226,23 +227,51 @@ def preprocess_for_parseq_strhub(img_crop_bgr, parseq_transform, device):
     return img_tensor.to(device)
 
 
-# --- Simple Orientation Correction ---
+# --- Image Rotation Utility ---
+def rotate_image_cv(image_cv, angle_degrees):
+    if angle_degrees == 0: return image_cv
+    elif angle_degrees == 90: return cv2.rotate(image_cv, cv2.ROTATE_90_CLOCKWISE)
+    elif angle_degrees == 180: return cv2.rotate(image_cv, cv2.ROTATE_180)
+    elif angle_degrees == 270: return cv2.rotate(image_cv, cv2.ROTATE_90_COUNTERCLOCKWISE)
+    else: return image_cv # Should not happen with current logic
+
+# --- Global Page Orientation Correction using Tesseract ---
+def get_global_page_orientation_tesseract(image_bgr, tesseract_lang='ara', dpi=300):
+    print("Attempting global page orientation detection with Tesseract OSD...")
+    try:
+        pil_img = PILImage.fromarray(cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB))
+        tess_config = f'--psm 0 --dpi {dpi}' 
+        osd_data = pytesseract.image_to_osd(pil_img, lang=tesseract_lang, config=tess_config)
+        
+        detected_page_orientation = 0 
+        for line in osd_data.split('\n'):
+            if 'Orientation in degrees:' in line:
+                try:
+                    detected_page_orientation = int(line.split(':')[1].strip())
+                    print(f"Tesseract OSD detected global page orientation: {detected_page_orientation} degrees.")
+                    return detected_page_orientation
+                except ValueError:
+                    print(f"Warning: Could not parse global OSD value: {line}")
+                    return 0 
+        print("Tesseract OSD did not explicitly state 'Orientation in degrees'. Assuming 0.")
+        return 0 
+    except Exception as e:
+        print(f"Error during global Tesseract OSD: {e}. Assuming 0 degrees page orientation.")
+        return 0
+
+# --- Simple Per-Crop Orientation Correction ---
 def simple_orientation_correction(image_crop_bgr: np.ndarray) -> np.ndarray:
     if image_crop_bgr is None or image_crop_bgr.shape[0] == 0 or image_crop_bgr.shape[1] == 0:
         return image_crop_bgr
-
     h, w = image_crop_bgr.shape[:2]
     if w < h: 
-        corrected_image = cv2.rotate(image_crop_bgr, cv2.ROTATE_90_COUNTERCLOCKWISE)
-        return corrected_image
+        return cv2.rotate(image_crop_bgr, cv2.ROTATE_90_COUNTERCLOCKWISE)
     else:
         return image_crop_bgr
 
-
 # --- Cropping Utility ---
 def get_cropped_image_from_poly(image_bgr, poly_pts):
-    if poly_pts is None or len(poly_pts) < 4: 
-        return None
+    if poly_pts is None or len(poly_pts) < 4: return None
     
     poly = np.array(poly_pts, dtype=np.float32)
     rect = cv2.minAreaRect(poly)  
@@ -267,18 +296,11 @@ def get_cropped_image_from_poly(image_bgr, poly_pts):
 
     dst_pts = np.array([[0, 0], [target_w - 1, 0], [target_w - 1, target_h - 1], [0, target_h - 1]], dtype="float32")
     
-    # Re-order poly_pts to TL, TR, BR, BL for getPerspectiveTransform if not already in that order
-    # This is a common heuristic for ordering quadrilateral points.
     s = poly.sum(axis=1)
     ordered_src_pts = np.zeros((4, 2), dtype="float32")
-    ordered_src_pts[0] = poly[np.argmin(s)] # Top-left
-    ordered_src_pts[2] = poly[np.argmax(s)] # Bottom-right
+    ordered_src_pts[0] = poly[np.argmin(s)] 
+    ordered_src_pts[2] = poly[np.argmax(s)] 
     
-    diff = np.diff(poly, axis=1) # Computes x_i+1 - x_i, y_i+1 - y_i; this is not y-x.
-                                 # For TR and BL based on x and y values:
-    
-    # Alternative logic for TR and BL after TL and BR are found
-    # Identify remaining two points not TL or BR
     remaining_indices = [i for i, pt in enumerate(poly) 
                          if not np.array_equal(pt, ordered_src_pts[0]) and \
                             not np.array_equal(pt, ordered_src_pts[2])]
@@ -286,17 +308,15 @@ def get_cropped_image_from_poly(image_bgr, poly_pts):
     if len(remaining_indices) == 2:
         pt1 = poly[remaining_indices[0]]
         pt2 = poly[remaining_indices[1]]
-        # TR usually has smaller y than BL, or if y are similar, larger x
-        if pt1[1] < pt2[1] or (pt1[1] == pt2[1] and pt1[0] > pt2[0]):
-            ordered_src_pts[1] = pt1 # Top-right
-            ordered_src_pts[3] = pt2 # Bottom-left
+        if pt1[1] < pt2[1] or (abs(pt1[1] - pt2[1]) < 1e-3 and pt1[0] > pt2[0]): # Check y first, then x for TR
+            ordered_src_pts[1] = pt1 
+            ordered_src_pts[3] = pt2 
         else:
-            ordered_src_pts[1] = pt2 # Top-right
-            ordered_src_pts[3] = pt1 # Bottom-left
-    else:
-        # Fallback if reordering is problematic, use original poly (might lead to skewed warps)
-        ordered_src_pts = poly.astype("float32")
-
+            ordered_src_pts[1] = pt2 
+            ordered_src_pts[3] = pt1 
+    else: # Fallback if point ordering fails
+        print("Warning: Polygon point reordering for perspective transform might be incorrect.")
+        ordered_src_pts = poly.astype("float32") # Use original if reordering fails
 
     M = cv2.getPerspectiveTransform(ordered_src_pts, dst_pts)
     warped_crop = cv2.warpPerspective(image_bgr, M, (target_w, target_h))
@@ -318,6 +338,33 @@ def main_ocr_pipeline(args):
             os.makedirs(debug_output_dir)
             print(f"Created debug crops directory: {debug_output_dir}")
 
+    print(f"Processing image: {args.image_path}")
+    image_bgr_input = cv2.imread(args.image_path)
+    if image_bgr_input is None:
+        print(f"Error: Could not read image at {args.image_path}"); return
+    base_image_filename = os.path.splitext(os.path.basename(args.image_path))[0]
+
+    image_bgr_oriented = image_bgr_input.copy() 
+    if args.correct_global_page_orientation: 
+        page_orientation_angle = get_global_page_orientation_tesseract(
+            image_bgr_input, tesseract_lang=args.tesseract_lang, dpi=args.tesseract_dpi
+        )
+        rotation_to_apply = 0
+        if page_orientation_angle == 90: rotation_to_apply = 270 
+        elif page_orientation_angle == 180: rotation_to_apply = 180
+        elif page_orientation_angle == 270: rotation_to_apply = 90
+        
+        if rotation_to_apply != 0:
+            print(f"Correcting global page orientation. Rotating by {rotation_to_apply} degrees.")
+            image_bgr_oriented = rotate_image_cv(image_bgr_input, rotation_to_apply)
+            if args.save_debug_crops:
+                oriented_page_fn = f"{base_image_filename}_page_globally_oriented.png"
+                cv2.imwrite(os.path.join(debug_output_dir, oriented_page_fn), image_bgr_oriented)
+        else:
+            print("Global page orientation is likely upright or Tesseract OSD failed.")
+    else:
+        print("Skipping global page orientation correction.")
+    
     craft_net = CRAFT()
     print(f'Loading CRAFT weights from: {args.craft_model_path}')
     checkpoint_craft = torch.load(args.craft_model_path, map_location=device, weights_only=False) 
@@ -330,62 +377,31 @@ def main_ocr_pipeline(args):
 
     parseq_model, parseq_img_transform = load_parseq_model_strhub(args.parseq_model_path, device)
     
-    print(f"Processing image: {args.image_path}")
-    image_bgr_original = cv2.imread(args.image_path)
-    if image_bgr_original is None:
-        print(f"Error: Could not read image at {args.image_path}"); return
-    base_image_filename = os.path.splitext(os.path.basename(args.image_path))[0]
-
     detected_polys_from_craft = perform_craft_inference(
-        craft_net, image_bgr_original, args.text_threshold, args.link_threshold,
+        craft_net, image_bgr_oriented, args.text_threshold, args.link_threshold,
         args.low_text, cuda_enabled, args.poly, args.canvas_size, args.mag_ratio
     )
-    print(f"CRAFT detected {len(detected_polys_from_craft)} potential text regions.")
+    print(f"CRAFT detected {len(detected_polys_from_craft)} initial text regions on processed page.")
 
-        # >>> STAGE: Sort Detected Regions for Right-to-Left Reading Order <<<
+    regions_with_x_coords_for_sort = []
     if detected_polys_from_craft:
-        # Create a list of tuples: (representative_x_coordinate, polygon_data)
-        # We'll use the centroid's x-coordinate for sorting.
-        # Or, you could use the minimum x-coordinate of the polygon (leftmost point of the box)
-        # or maximum x-coordinate (rightmost point of the box).
-        # For right-to-left, we want to sort by the rightmost extent, or centroid.
-        
-        regions_with_x_coords = []
         for poly_pts in detected_polys_from_craft:
             if poly_pts is not None and len(poly_pts) > 0:
-                # Calculate centroid x-coordinate
-                moments = cv2.moments(poly_pts.astype(np.int32)) # moments need int points
-                if moments["m00"] != 0:
-                    center_x = int(moments["m10"] / moments["m00"])
-                else: # Fallback if moments are zero (e.g., very thin line)
-                    center_x = int(np.mean(poly_pts[:, 0])) # Mean of x-coordinates
-                
-                # Alternative: use the maximum x-coordinate (rightmost point of the polygon)
-                # max_x = int(np.max(poly_pts[:, 0]))
-                # regions_with_x_coords.append((max_x, poly_pts))
-                
-                regions_with_x_coords.append((center_x, poly_pts))
-
-        # Sort by the x-coordinate in descending order (rightmost first)
-        # If two boxes have similar x-centroids (e.g. stacked vertically),
-        # you might add a secondary sort key (e.g., y-coordinate) if needed,
-        # but for simple lines of text, x-sorting is usually sufficient.
-        regions_with_x_coords.sort(key=lambda item: item[0], reverse=True)
-        
-        # Get the sorted polygons
-        sorted_detected_polys = [item[1] for item in regions_with_x_coords]
+                moments = cv2.moments(poly_pts.astype(np.int32))
+                center_x = int(moments["m10"] / moments["m00"]) if moments["m00"] != 0 else int(np.mean(poly_pts[:, 0]))
+                regions_with_x_coords_for_sort.append((center_x, poly_pts))
+        regions_with_x_coords_for_sort.sort(key=lambda item: item[0], reverse=True)
+        sorted_detected_polys = [item[1] for item in regions_with_x_coords_for_sort]
         print(f"Regions sorted for right-to-left processing: {len(sorted_detected_polys)} regions.")
     else:
         sorted_detected_polys = []
 
-    results_data = []
-    output_image_viz = image_bgr_original.copy()
+    results_data = [] 
     recognized_text_snippets = []
+    output_image_viz = image_bgr_oriented.copy() 
 
-    for i, poly_pts in enumerate(sorted_detected_polys):
-        if poly_pts is None: continue
-
-        cropped_bgr = get_cropped_image_from_poly(image_bgr_original, poly_pts)
+    for i, poly_pts in enumerate(sorted_detected_polys): 
+        cropped_bgr = get_cropped_image_from_poly(image_bgr_oriented, poly_pts) 
         if cropped_bgr is None or cropped_bgr.shape[0] == 0 or cropped_bgr.shape[1] == 0:
             print(f"Warning: Skipping invalid crop for sorted region {i+1}"); continue
 
@@ -396,7 +412,7 @@ def main_ocr_pipeline(args):
             except Exception as e: print(f"Error saving original crop {original_crop_filepath}: {e}")
 
         crop_for_parseq = cropped_bgr 
-        if args.use_simple_orientation:
+        if args.use_simple_orientation: 
             corrected_bgr_crop = simple_orientation_correction(cropped_bgr)
             crop_for_parseq = corrected_bgr_crop 
             if args.save_debug_crops and corrected_bgr_crop is not cropped_bgr:
@@ -404,7 +420,7 @@ def main_ocr_pipeline(args):
                 corrected_crop_filepath = os.path.join(debug_output_dir, corrected_crop_filename)
                 try: cv2.imwrite(corrected_crop_filepath, crop_for_parseq)
                 except Exception as e: print(f"Error saving simple corrected crop {corrected_crop_filepath}: {e}")
-        
+
         parseq_input_tensor = preprocess_for_parseq_strhub(crop_for_parseq, parseq_img_transform, device)
         if parseq_input_tensor is None:
             print(f"Warning: Skipping sorted region {i+1} (Parseq preprocess failed)."); continue
@@ -424,40 +440,39 @@ def main_ocr_pipeline(args):
                     elif token_confidences_tensor.numel() > 1: 
                         sequence_confidence_float = token_confidences_tensor.mean().item() 
                 
+                current_sort_key_x = "N/A"
+                if i < len(regions_with_x_coords_for_sort): # Ensure index is valid
+                    current_sort_key_x = regions_with_x_coords_for_sort[i][0]
+
                 print_conf_str = f"{sequence_confidence_float:.4f}" if sequence_confidence_float is not None else "N/A"
-                print(f"Sorted Region {i+1} (Original X: {regions_with_x_coords[i][0]}): Text = '{recognized_text_segment}', Conf = {print_conf_str}")
+                print(f"Sorted Region {i+1} (X-Key: {current_sort_key_x}): Text = '{recognized_text_segment}', Conf = {print_conf_str}")
                 
-                # Store data for later, including original x-coordinate for verification if needed
                 results_data.append({
-                    'original_x': regions_with_x_coords[i][0], # Centroid X used for sorting
+                    'original_x_sort_key': current_sort_key_x,
                     'polygon': poly_pts, 
                     'text': recognized_text_segment, 
                     'confidence': sequence_confidence_float
                 })
-                recognized_text_snippets.append(recognized_text_segment) # Add to list in R-L order
+                recognized_text_snippets.append(recognized_text_segment) 
                 
                 cv2.polylines(output_image_viz, [poly_pts.astype(np.int32)], True, (0,0,255), 2) 
             else:
                 print(f"Warning: No text decoded from Parseq for sorted region {i+1}")
     
-    # --- Construct the final right-to-left sentence ---
-    # Since we processed snippets from right to left, join them in that order.
-    # For Jawi, words are typically space-separated.
     final_right_to_left_text = " ".join(recognized_text_snippets)
     print(f"\nFinal Combined Right-to-Left Text: {final_right_to_left_text}\n")
 
-    # 6. Save results
     if args.output_dir:
         if not os.path.exists(args.output_dir): os.makedirs(args.output_dir)
         viz_filepath = os.path.join(args.output_dir, f"res_ocr_{base_image_filename}.jpg")
-        cv2.imwrite(viz_filepath, output_image_viz)
+        cv2.imwrite(viz_filepath, output_image_viz) 
         print(f"Visualized OCR result saved to: {viz_filepath}")
         
         text_result_filepath = os.path.join(args.output_dir, f"res_ocr_{base_image_filename}.txt")
         with open(text_result_filepath, 'w', encoding='utf-8') as f:
             f.write(f"Final Combined Text (Right-to-Left): {final_right_to_left_text}\n\n")
-            f.write("Individual Region Detections (Sorted Right-to-Left):\n")
-            for res_item in results_data: # Iterate through the collected data
+            f.write("Individual Region Detections (Sorted Right-to-Left from Processed Page):\n")
+            for res_item in results_data: 
                 poly_str = ""
                 if res_item['polygon'] is not None:
                     try: 
@@ -465,27 +480,33 @@ def main_ocr_pipeline(args):
                     except TypeError:
                         poly_str = "Error_parsing_polygon"
                 conf_str = f"{res_item['confidence']:.4f}" if res_item['confidence'] is not None else "N/A"
-                f.write(f"Original_X_Sort_Key: {res_item['original_x']} | Polygon: [{poly_str}] | Text: {res_item['text']} | Confidence: {conf_str}\n")
+                f.write(f"Original_X_Sort_Key: {res_item['original_x_sort_key']} | Polygon: [{poly_str}] | Text: {res_item['text']} | Confidence: {conf_str}\n")
         print(f"Text OCR results saved to: {text_result_filepath}")
         
     print("OCR pipeline finished.")
 
+
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Jawi OCR Pipeline with Simple Orientation Correction')
+    parser = argparse.ArgumentParser(description='Jawi OCR Pipeline with Global & Simple Orientation & R-L Sort')
     parser.add_argument('--image_path', required=True, type=str, help='Path to the input image')
     parser.add_argument('--craft_model_path', required=True, type=str, help='Path to CRAFT model')
     parser.add_argument('--parseq_model_path', required=True, type=str, help='Path to Parseq model (STRHub)')
     parser.add_argument('--output_dir', default='./jawi_ocr_results/', type=str, help='Directory for results')
+    
     parser.add_argument('--text_threshold', default=0.7, type=float, help='CRAFT: text confidence threshold')
     parser.add_argument('--low_text', default=0.4, type=float, help='CRAFT: text low_text threshold')
     parser.add_argument('--link_threshold', default=0.4, type=float, help='CRAFT: link confidence threshold')
     parser.add_argument('--canvas_size', default=1280, type=int, help='CRAFT: image size for inference')
     parser.add_argument('--mag_ratio', default=1.5, type=float, help='CRAFT: image magnification ratio')
     parser.add_argument('--poly', default=False, action='store_true', help='CRAFT: enable polygon type detection')
-    parser.add_argument('--use_simple_orientation', action='store_true', help='Enable simple aspect-ratio orientation correction')
+    
+    parser.add_argument('--correct_global_page_orientation', action='store_true', help='Enable global page OSD via Tesseract')
+    parser.add_argument('--tesseract_lang', type=str, default='ara', help='Language for Tesseract OSD')
+    parser.add_argument('--tesseract_dpi', type=int, default=300, help='Assumed DPI for Tesseract OSD')
+
+    parser.add_argument('--use_simple_orientation', action='store_true', help='Enable simple aspect-ratio per-crop orientation correction')
     parser.add_argument('--save_debug_crops', action='store_true', help='Save intermediate cropped images')
     parser.add_argument('--no_cuda', action='store_true', help='Disable CUDA')
     
     args = parser.parse_args()
     main_ocr_pipeline(args)
-
