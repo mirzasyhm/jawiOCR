@@ -11,7 +11,7 @@ import os
 IMG_HEIGHT = 128
 IMG_WIDTH = 128
 IMAGE_SIZE = (IMG_HEIGHT, IMG_WIDTH)
-MODEL_PATH = 'best_jawi_orientation_classifier_mixed_precision.keras' # Or 'jawi_orientation_classifier_mixed_precision.keras'
+MODEL_PATH = 'best_jawi_orientation_resnet50.keras' # Or 'jawi_orientation_classifier_mixed_precision.keras'
 
 # !!! IMPORTANT: CLASS NAMES !!!
 # This list MUST match the order of subdirectories in your 'train' folder,
