@@ -259,7 +259,7 @@ def rotate_image_cv(image_cv, angle_degrees):
         # print(f"Warning: Unsupported rotation angle {angle_degrees}. Returning original.")
         return image_cv
 
-def correct_orientation_tesseract(image_crop_bgr, tesseract_lang='ara', min_height=30, min_width=30): # Added min_height/width
+def correct_orientation_tesseract(image_crop_bgr, tesseract_lang='ara', min_height=20, min_width=20): # Added min_height/width
     """Corrects the orientation of a text crop using Tesseract OSD."""
     if image_crop_bgr is None or image_crop_bgr.shape[0] == 0 or image_crop_bgr.shape[1] == 0:
         return image_crop_bgr
@@ -268,9 +268,20 @@ def correct_orientation_tesseract(image_crop_bgr, tesseract_lang='ara', min_heig
     if h < min_height or w < min_width:
         # print(f"Skipping Tesseract OSD for small crop (h:{h}, w:{w}). Assuming 0 deg orientation.")
         return image_crop_bgr # Return original, assuming it's correctly oriented or too small to tell
+    UPSCALE_THRESHOLD_H = 50 # Example: if height is less than this, consider upscaling
+    UPSCALE_THRESHOLD_W = 50 # Example
+    UPSCALE_FACTOR = 1.5 # Example: upscale by 50%
+
+    temp_crop_for_osd = image_crop_bgr.copy()
+    if h < UPSCALE_THRESHOLD_H or w < UPSCALE_THRESHOLD_W:
+    # print(f"Small crop (h:{h}, w:{w}). Upscaling by {UPSCALE_FACTOR}x for OSD attempt.")
+        new_w = int(w * UPSCALE_FACTOR)
+        new_h = int(h * UPSCALE_FACTOR)
+    if new_w > 0 and new_h > 0:
+        temp_crop_for_osd = cv2.resize(image_crop_bgr, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
 
     try:
-        pil_img = PILImage.fromarray(cv2.cvtColor(image_crop_bgr, cv2.COLOR_BGR2RGB))
+        pil_img = PILImage.fromarray(cv2.cvtColor(temp_crop_for_osd, cv2.COLOR_BGR2RGB))
         osd_data = pytesseract.image_to_osd(pil_img, lang=tesseract_lang, config='--psm 0')
         
         detected_orientation = 0 
