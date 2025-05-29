@@ -479,7 +479,7 @@ def simple_orientation_correction(image_crop_bgr: np.ndarray) -> np.ndarray:
     if w < h: # If width is less than height, assume it's vertical text
         # print(f"Simple OSD: Crop h={h}, w={w}. Rotating 90 deg clockwise.")
         # Rotate 90 degrees clockwise
-        corrected_image = cv2.rotate(image_crop_bgr, cv2.ROTATE_90_CLOCKWISE)
+        corrected_image = cv2.rotate(image_crop_bgr, cv2.ROTATE_90_ANTICLOCKWISE)
         return corrected_image
     else:
         # print(f"Simple OSD: Crop h={h}, w={w}. Assuming horizontal, no rotation.")
