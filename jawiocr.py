@@ -8,6 +8,7 @@ import torch
 import torch.backends.cudnn as cudnn
 from collections import OrderedDict
 from PIL import Image as PILImage
+from pytesseract import Output
 from torchvision import transforms as TorchTransforms
 import pytesseract # For global page OSD
 
@@ -240,8 +241,7 @@ def get_global_page_orientation_tesseract(image_bgr, tesseract_lang='ara', dpi=3
     print("Attempting global page orientation detection with Tesseract OSD...")
     try:
         pil_img = PILImage.fromarray(cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB))
-        tess_config = f'--psm 0 --dpi {dpi} -c min_characters_to_try=30'  
-        osd_data = pytesseract.image_to_osd(pil_img, lang=tesseract_lang, config=tess_config)
+        osd_data = pytesseract.image_to_osd(pil_img, output_type=Output.DICT)
         
         detected_page_orientation = 0 
         for line in osd_data.split('\n'):
