@@ -378,7 +378,7 @@ def main_ocr_pipeline(args):
     else:
         sorted_detected_polys = []
 
-    results = []
+    results_data = []
     output_image_viz = image_bgr_original.copy()
     recognized_text_snippets = []
 
