@@ -9,7 +9,6 @@ import torch.backends.cudnn as cudnn
 from collections import OrderedDict
 from PIL import Image as PILImage
 from torchvision import transforms as TorchTransforms
-import pytesseract # For global page OSD
 
 # --- Path Setup ---
 current_script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -227,71 +226,13 @@ def preprocess_for_parseq_strhub(img_crop_bgr, parseq_transform, device):
     return img_tensor.to(device)
 
 
-# --- Image Rotation Utility ---
-def rotate_image_cv(image_cv, angle_degrees):
-    if angle_degrees == 0: return image_cv
-    elif angle_degrees == 90: return cv2.rotate(image_cv, cv2.ROTATE_90_CLOCKWISE)
-    elif angle_degrees == 180: return cv2.rotate(image_cv, cv2.ROTATE_180)
-    elif angle_degrees == 270: return cv2.rotate(image_cv, cv2.ROTATE_90_COUNTERCLOCKWISE)
-    else: return image_cv
-
-# --- Global Page Orientation Correction using Tesseract (File-based) ---
-def get_global_page_orientation_tesseract_filebased(image_bgr, 
-                                                    tesseract_lang='ara', 
-                                                    dpi=300, 
-                                                    min_chars_for_osd=15,
-                                                    temp_image_name="temp_osd_page.png"):
-    print("Attempting global page orientation detection with Tesseract OSD (file-based)...")
-    temp_file_path = os.path.join(os.getcwd(), temp_image_name) # Save in current working directory
-    
-    try:
-        # Save the OpenCV BGR image to a temporary file
-        cv2.imwrite(temp_file_path, image_bgr)
-        if not os.path.exists(temp_file_path):
-            print(f"Error: Could not write temporary image file to {temp_file_path}")
-            return 0
-
-        #tess_config = f'--psm 0 --dpi {dpi} -c min_characters_to_try={min_chars_for_osd}'
-        #print(f"Using Tesseract config for OSD: {tess_config} on file: {temp_file_path}")
-        
-        # Pass the file path to pytesseract
-        osd_data = pytesseract.image_to_osd(temp_file_path, lang=tesseract_lang, config='--psm 0')
-        
-        detected_page_orientation = 0 
-        for line in osd_data.split('\n'):
-            if 'Orientation in degrees:' in line:
-                try:
-                    detected_page_orientation = int(line.split(':')[1].strip())
-                    print(f"Tesseract OSD detected global page orientation: {detected_page_orientation} degrees.")
-                    return detected_page_orientation
-                except ValueError:
-                    print(f"Warning: Could not parse global orientation value from OSD line: {line}")
-                    return 0 
-        
-        print("Tesseract OSD did not explicitly state 'Orientation in degrees'. Assuming 0.")
-        return 0 
-        
-    except pytesseract.TesseractError as e:
-        print(f"TesseractError during global OSD (file-based): {e}. Assuming 0 degrees.")
-        return 0
-    except Exception as e:
-        print(f"Unexpected error during global Tesseract OSD (file-based): {e}. Assuming 0 degrees.")
-        return 0
-    finally:
-        # Clean up the temporary file
-        if os.path.exists(temp_file_path):
-            try:
-                os.remove(temp_file_path)
-            except Exception as e_rem:
-                print(f"Warning: Could not remove temporary OSD file {temp_file_path}: {e_rem}")
-
 # --- Simple Per-Crop Orientation Correction ---
 def simple_orientation_correction(image_crop_bgr: np.ndarray) -> np.ndarray:
     if image_crop_bgr is None or image_crop_bgr.shape[0] == 0 or image_crop_bgr.shape[1] == 0:
         return image_crop_bgr
     h, w = image_crop_bgr.shape[:2]
     if w < h: 
-        return cv2.rotate(image_crop_bgr, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        return cv2.rotate(image_crop_bgr, cv2.ROTATE_90_CLOCKWISE)
     else:
         return image_crop_bgr
 
@@ -365,159 +306,110 @@ def main_ocr_pipeline(args):
             print(f"Created debug crops directory: {debug_output_dir}")
 
     print(f"Processing image: {args.image_path}")
-    image_bgr_input = cv2.imread(args.image_path)
-    if image_bgr_input is None:
+    image_bgr_original = cv2.imread(args.image_path)
+    if image_bgr_original is None:
         print(f"Error: Could not read image at {args.image_path}"); return
     base_image_filename = os.path.splitext(os.path.basename(args.image_path))[0]
-
-    image_bgr_oriented = image_bgr_input.copy() 
-    if args.correct_global_page_orientation: 
-        page_orientation_angle = get_global_page_orientation_tesseract_filebased( # Using filebased version
-            image_bgr_input, 
-            tesseract_lang=args.tesseract_lang, 
-            dpi=args.tesseract_dpi,
-            min_chars_for_osd=args.tesseract_min_chars_for_global_osd,
-            temp_image_name=f"temp_osd_{base_image_filename}.png" # Unique temp file name
-        )
-        rotation_to_apply = 0
-        if page_orientation_angle == 90: rotation_to_apply = 270 
-        elif page_orientation_angle == 180: rotation_to_apply = 180
-        elif page_orientation_angle == 270: rotation_to_apply = 90
-        
-        if rotation_to_apply != 0:
-            print(f"Correcting global page orientation. Rotating by {rotation_to_apply} degrees.")
-            image_bgr_oriented = rotate_image_cv(image_bgr_input, rotation_to_apply)
-            if args.save_debug_crops:
-                oriented_page_fn = f"{base_image_filename}_page_globally_oriented.png"
-                cv2.imwrite(os.path.join(debug_output_dir, oriented_page_fn), image_bgr_oriented)
-        else:
-            print("Global page orientation is likely upright or Tesseract OSD failed.")
-    else:
-        print("Skipping global page orientation correction.")
     
+    # Image fed to CRAFT is the original image without global orientation correction
+    image_bgr_processed_for_craft = image_bgr_original.copy() 
+
     craft_net = CRAFT()
     print(f'Loading CRAFT weights from: {args.craft_model_path}')
-    checkpoint_craft = torch.load(args.craft_model_path, map_location=device, weights_only=False) 
-    if 'craft' in checkpoint_craft: model_state_dict_craft = checkpoint_craft['craft']
-    elif 'model' in checkpoint_craft: model_state_dict_craft = checkpoint_craft['model']
-    elif 'state_dict' in checkpoint_craft: model_state_dict_craft = checkpoint_craft['state_dict']
-    else: model_state_dict_craft = checkpoint_craft
-    craft_net.load_state_dict(copyStateDict(model_state_dict_craft))
-    craft_net.to(device); craft_net.eval()
+    checkpoint_craft = torch.load(args.craft_model_path,map_location=device,weights_only=False)
+    if 'craft' in checkpoint_craft: model_state_dict_craft=checkpoint_craft['craft']
+    elif 'model' in checkpoint_craft: model_state_dict_craft=checkpoint_craft['model']
+    elif 'state_dict' in checkpoint_craft: model_state_dict_craft=checkpoint_craft['state_dict']
+    else: model_state_dict_craft=checkpoint_craft
+    craft_net.load_state_dict(copyStateDict(model_state_dict_craft)); craft_net.to(device); craft_net.eval()
 
-    parseq_model, parseq_img_transform = load_parseq_model_strhub(args.parseq_model_path, device)
+    parseq_model,parseq_img_transform = load_parseq_model_strhub(args.parseq_model_path,device)
     
     detected_polys_from_craft = perform_craft_inference(
-        craft_net, image_bgr_oriented, args.text_threshold, args.link_threshold,
-        args.low_text, cuda_enabled, args.poly, args.canvas_size, args.mag_ratio
+        craft_net,image_bgr_processed_for_craft,args.text_threshold,args.link_threshold,
+        args.low_text,cuda_enabled,args.poly,args.canvas_size,args.mag_ratio
     )
-    print(f"CRAFT detected {len(detected_polys_from_craft)} initial text regions on processed page.")
+    print(f"CRAFT detected {len(detected_polys_from_craft)} text regions.")
 
     regions_with_x_coords_for_sort = []
     if detected_polys_from_craft:
         for poly_pts in detected_polys_from_craft:
-            if poly_pts is not None and len(poly_pts) > 0:
+            if poly_pts is not None and len(poly_pts)>0:
                 moments = cv2.moments(poly_pts.astype(np.int32))
-                center_x = int(moments["m10"] / moments["m00"]) if moments["m00"] != 0 else int(np.mean(poly_pts[:, 0]))
-                regions_with_x_coords_for_sort.append((center_x, poly_pts))
-        regions_with_x_coords_for_sort.sort(key=lambda item: item[0], reverse=True)
+                center_x = int(moments["m10"]/moments["m00"]) if moments["m00"]!=0 else int(np.mean(poly_pts[:,0]))
+                regions_with_x_coords_for_sort.append((center_x,poly_pts))
+        regions_with_x_coords_for_sort.sort(key=lambda item:item[0],reverse=True)
         sorted_detected_polys = [item[1] for item in regions_with_x_coords_for_sort]
-        print(f"Regions sorted for right-to-left processing: {len(sorted_detected_polys)} regions.")
-    else:
-        sorted_detected_polys = []
+        print(f"Regions sorted R-L: {len(sorted_detected_polys)} regions.")
+    else: sorted_detected_polys=[]
 
-    results_data = [] 
-    recognized_text_snippets = []
-    output_image_viz = image_bgr_oriented.copy() 
+    results_data,recognized_text_snippets = [],[]
+    output_image_viz = image_bgr_processed_for_craft.copy() # Visualize on the same image CRAFT saw
 
-    for i, poly_pts in enumerate(sorted_detected_polys): 
-        cropped_bgr = get_cropped_image_from_poly(image_bgr_oriented, poly_pts) 
-        if cropped_bgr is None or cropped_bgr.shape[0] == 0 or cropped_bgr.shape[1] == 0:
-            print(f"Warning: Skipping invalid crop for sorted region {i+1}"); continue
-
+    for i, poly_pts in enumerate(sorted_detected_polys):
+        # Cropping is done from the image that CRAFT processed
+        cropped_bgr = get_cropped_image_from_poly(image_bgr_processed_for_craft, poly_pts)
+        if cropped_bgr is None or cropped_bgr.shape[0]==0 or cropped_bgr.shape[1]==0:
+            print(f"Skipping invalid crop for sorted region {i+1}"); continue
+        
         if args.save_debug_crops:
-            original_crop_filename = f"{base_image_filename}_sorted_region_{i+1}_original_crop.png"
-            original_crop_filepath = os.path.join(debug_output_dir, original_crop_filename)
-            try: cv2.imwrite(original_crop_filepath, cropped_bgr)
-            except Exception as e: print(f"Error saving original crop {original_crop_filepath}: {e}")
-
-        crop_for_parseq = cropped_bgr 
-        if args.use_simple_orientation: 
+            fn=f"{base_image_filename}_sregion_{i+1}_crop.png"; fp=os.path.join(debug_output_dir,fn)
+            try: cv2.imwrite(fp,cropped_bgr)
+            except Exception as e: print(f"Err save crop {fp}:{e}")
+        
+        crop_for_parseq = cropped_bgr
+        if args.use_simple_orientation:
             corrected_bgr_crop = simple_orientation_correction(cropped_bgr)
-            crop_for_parseq = corrected_bgr_crop 
+            crop_for_parseq = corrected_bgr_crop
             if args.save_debug_crops and corrected_bgr_crop is not cropped_bgr:
-                corrected_crop_filename = f"{base_image_filename}_sorted_region_{i+1}_simple_corrected_crop.png"
-                corrected_crop_filepath = os.path.join(debug_output_dir, corrected_crop_filename)
-                try: cv2.imwrite(corrected_crop_filepath, crop_for_parseq)
-                except Exception as e: print(f"Error saving simple corrected crop {corrected_crop_filepath}: {e}")
-
-        parseq_input_tensor = preprocess_for_parseq_strhub(crop_for_parseq, parseq_img_transform, device)
-        if parseq_input_tensor is None:
-            print(f"Warning: Skipping sorted region {i+1} (Parseq preprocess failed)."); continue
-
+                fn=f"{base_image_filename}_sregion_{i+1}_corrected.png"; fp=os.path.join(debug_output_dir,fn)
+                try: cv2.imwrite(fp,crop_for_parseq)
+                except Exception as e: print(f"Err save corrected {fp}:{e}")
+        
+        parseq_input_tensor = preprocess_for_parseq_strhub(crop_for_parseq,parseq_img_transform,device)
+        if parseq_input_tensor is None: 
+            print(f"Skipping sorted region {i+1} (Parseq preprocess fail)."); continue
+        
         with torch.no_grad():
             logits = parseq_model(parseq_input_tensor)
             probabilities = logits.softmax(-1)
-            pred_texts, pred_confs_tensors_list = parseq_model.tokenizer.decode(probabilities)
-            
-            if pred_texts and len(pred_texts) > 0:
-                recognized_text_segment = pred_texts[0] 
-                token_confidences_tensor = pred_confs_tensors_list[0] if pred_confs_tensors_list and len(pred_confs_tensors_list) > 0 else None
-                sequence_confidence_float = None
-                if token_confidences_tensor is not None and isinstance(token_confidences_tensor, torch.Tensor):
-                    if token_confidences_tensor.numel() == 1: 
-                        sequence_confidence_float = token_confidences_tensor.item()
-                    elif token_confidences_tensor.numel() > 1: 
-                        sequence_confidence_float = token_confidences_tensor.mean().item() 
+            pred_texts,pred_confs_tensors_list = parseq_model.tokenizer.decode(probabilities)
+            if pred_texts and len(pred_texts)>0:
+                recognized_text_segment = pred_texts[0]
+                token_confidences = pred_confs_tensors_list[0] if pred_confs_tensors_list and len(pred_confs_tensors_list)>0 else None
+                seq_conf = None
+                if token_confidences is not None and isinstance(token_confidences,torch.Tensor):
+                    seq_conf = token_confidences.mean().item() if token_confidences.numel()>1 else token_confidences.item()
                 
-                current_sort_key_x = "N/A"
-                if i < len(regions_with_x_coords_for_sort): 
-                    current_sort_key_x = regions_with_x_coords_for_sort[i][0]
+                x_key = "N/A"
+                if i < len(regions_with_x_coords_for_sort): # Check index validity
+                     x_key = regions_with_x_coords_for_sort[i][0]
 
-                print_conf_str = f"{sequence_confidence_float:.4f}" if sequence_confidence_float is not None else "N/A"
-                print(f"Sorted Region {i+1} (X-Key: {current_sort_key_x}): Text = '{recognized_text_segment}', Conf = {print_conf_str}")
-                
-                results_data.append({
-                    'original_x_sort_key': current_sort_key_x,
-                    'polygon': poly_pts, 
-                    'text': recognized_text_segment, 
-                    'confidence': sequence_confidence_float
-                })
-                recognized_text_snippets.append(recognized_text_segment) 
-                
-                cv2.polylines(output_image_viz, [poly_pts.astype(np.int32)], True, (0,0,255), 2) 
-            else:
-                print(f"Warning: No text decoded from Parseq for sorted region {i+1}")
-    
-    final_right_to_left_text = " ".join(recognized_text_snippets)
-    print(f"\nFinal Combined Right-to-Left Text: {final_right_to_left_text}\n")
+                conf_str = f"{seq_conf:.4f}" if seq_conf is not None else "N/A"
+                print(f"SRegion {i+1}(X:{x_key}):Txt='{recognized_text_segment}',Conf={conf_str}")
+                results_data.append({'orig_x':x_key,'poly':poly_pts,'text':recognized_text_segment,'conf':seq_conf})
+                recognized_text_snippets.append(recognized_text_segment)
+                cv2.polylines(output_image_viz,[poly_pts.astype(np.int32)],True,(0,0,255),2)
+            else: print(f"No text decoded for sorted region {i+1}")
+            
+    final_rl_text = " ".join(recognized_text_snippets)
+    print(f"\nFinal Combined R-L Text: {final_rl_text}\n")
 
     if args.output_dir:
         if not os.path.exists(args.output_dir): os.makedirs(args.output_dir)
-        viz_filepath = os.path.join(args.output_dir, f"res_ocr_{base_image_filename}.jpg")
-        cv2.imwrite(viz_filepath, output_image_viz) 
-        print(f"Visualized OCR result saved to: {viz_filepath}")
-        
-        text_result_filepath = os.path.join(args.output_dir, f"res_ocr_{base_image_filename}.txt")
-        with open(text_result_filepath, 'w', encoding='utf-8') as f:
-            f.write(f"Final Combined Text (Right-to-Left): {final_right_to_left_text}\n\n")
-            f.write("Individual Region Detections (Sorted Right-to-Left from Processed Page):\n")
-            for res_item in results_data: 
-                poly_str = ""
-                if res_item['polygon'] is not None:
-                    try: 
-                        poly_str = ";".join([f"{int(p[0])},{int(p[1])}" for p in res_item['polygon']])
-                    except TypeError:
-                        poly_str = "Error_parsing_polygon"
-                conf_str = f"{res_item['confidence']:.4f}" if res_item['confidence'] is not None else "N/A"
-                f.write(f"Original_X_Sort_Key: {res_item['original_x_sort_key']} | Polygon: [{poly_str}] | Text: {res_item['text']} | Confidence: {conf_str}\n")
-        print(f"Text OCR results saved to: {text_result_filepath}")
-        
+        cv2.imwrite(os.path.join(args.output_dir,f"res_ocr_{base_image_filename}.jpg"),output_image_viz)
+        print(f"Viz saved to: {os.path.join(args.output_dir,f'res_ocr_{base_image_filename}.jpg')}")
+        with open(os.path.join(args.output_dir,f"res_ocr_{base_image_filename}.txt"),'w',encoding='utf-8') as f:
+            f.write(f"Final Text (R-L): {final_rl_text}\n\nRegions (Sorted R-L):\n")
+            for res in results_data:
+                poly_s = ";".join([f"{int(p[0])},{int(p[1])}" for p in res['poly']]) if res['poly'] is not None else "N/A"
+                conf_s = f"{res['conf']:.4f}" if res['conf'] is not None else "N/A"
+                f.write(f"X-Key:{res['orig_x']}|Poly:[{poly_s}]|Txt:{res['text']}|Conf:{conf_s}\n")
+        print(f"Txt results saved to: {os.path.join(args.output_dir,f'res_ocr_{base_image_filename}.txt')}")
     print("OCR pipeline finished.")
 
-
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Jawi OCR Pipeline with Global & Simple Orientation & R-L Sort')
+    parser = argparse.ArgumentParser(description='Jawi OCR: CRAFT + Simple Orientation + Parseq + R-L Sort')
     parser.add_argument('--image_path', required=True, type=str, help='Path to the input image')
     parser.add_argument('--craft_model_path', required=True, type=str, help='Path to CRAFT model')
     parser.add_argument('--parseq_model_path', required=True, type=str, help='Path to Parseq model (STRHub)')
@@ -530,14 +422,7 @@ if __name__ == '__main__':
     parser.add_argument('--mag_ratio', default=1.5, type=float, help='CRAFT: image magnification ratio')
     parser.add_argument('--poly', default=False, action='store_true', help='CRAFT: enable polygon type detection')
     
-    parser.add_argument('--correct_global_page_orientation', action='store_true', help='Enable global page OSD via Tesseract')
-    parser.add_argument('--tesseract_lang', type=str, default='ara', help='Language for Tesseract OSD')
-    parser.add_argument('--tesseract_dpi', type=int, default=300, help='Assumed DPI for Tesseract OSD')
-    parser.add_argument('--tesseract_min_chars_for_global_osd', type=int, default=15, 
-                        help='Tesseract config: min_characters_to_try for global page OSD')
-
-
-    parser.add_argument('--use_simple_orientation', action='store_true', help='Enable simple aspect-ratio per-crop orientation correction')
+    parser.add_argument('--use_simple_orientation', action='store_true', help='Enable W<H per-crop orientation correction')
     parser.add_argument('--save_debug_crops', action='store_true', help='Save intermediate cropped images')
     parser.add_argument('--no_cuda', action='store_true', help='Disable CUDA')
     
