@@ -421,6 +421,13 @@ def main_ocr_pipeline(args):
     device = torch.device('cuda' if cuda_enabled else 'cpu')
     print(f"Using device: {device}")
 
+        # --- Define output directories for debug images ---
+    debug_output_dir = os.path.join(args.output_dir, "debug_crops")
+    if args.save_debug_crops: # Add a new argument to control this
+        if not os.path.exists(debug_output_dir):
+            os.makedirs(debug_output_dir)
+            print(f"Created debug crops directory: {debug_output_dir}")
+
     # 1. Load CRAFT model
     craft_net = CRAFT()
     print(f'Loading CRAFT weights from: {args.craft_model_path}')
@@ -442,6 +449,7 @@ def main_ocr_pipeline(args):
     if image_bgr_original is None:
         print(f"Error: Could not read image at {args.image_path}")
         return
+    base_image_filename = os.path.splitext(os.path.basename(args.image_path))[0]
 
     # 4. Perform Text Detection (CRAFT)
     detected_polys_from_craft = perform_craft_inference(
@@ -450,7 +458,7 @@ def main_ocr_pipeline(args):
     )
     print(f"CRAFT detected {len(detected_polys_from_craft)} potential text regions.")
 
-    # 5. Process each detected region
+   # 5. Process each detected region
     results = []
     output_image_viz = image_bgr_original.copy()
 
@@ -464,20 +472,44 @@ def main_ocr_pipeline(args):
             print(f"Warning: Skipping invalid crop for polygon {i+1}")
             continue
 
+        # --- Save the initial cropped image (before orientation correction) ---
+        if args.save_debug_crops:
+            original_crop_filename = f"{base_image_filename}_region_{i+1}_original_crop.png"
+            original_crop_filepath = os.path.join(debug_output_dir, original_crop_filename)
+            try:
+                cv2.imwrite(original_crop_filepath, cropped_bgr)
+                print(f"Saved original detected region {i+1} to: {original_crop_filepath}")
+            except Exception as e_imwrite:
+                print(f"Error saving original crop {original_crop_filepath}: {e_imwrite}")
+
+
         # >>> STAGE: Orientation Correction (using Tesseract if enabled) <<<
         crop_for_parseq = cropped_bgr 
         if args.use_tesseract_orientation:
+            # Use the parameters from args for min_height/width etc.
             corrected_bgr_crop = correct_orientation_tesseract(
                 cropped_bgr, 
                 tesseract_lang=args.tesseract_lang,
-                min_height=args.tesseract_min_crop_height, # Add new args
-                min_width=args.tesseract_min_crop_width   # Add new args
+                min_orig_h_for_osd=args.tesseract_min_orig_h_for_osd, # Make sure these are in args
+                min_orig_w_for_osd=args.tesseract_min_orig_w_for_osd, # Make sure these are in args
+                upscale_factor=args.tesseract_osd_upscale_factor, # Make sure these are in args
+                dpi_for_tesseract=args.tesseract_dpi # Make sure these are in args
             )
             if corrected_bgr_crop is not None:
                 crop_for_parseq = corrected_bgr_crop
-            else:
-                print(f"Warning: Tesseract orientation correction failed for region {i+1}, using original.")
-        
+
+                # --- Save the orientation-corrected crop image ---
+                if args.save_debug_crops and corrected_bgr_crop is not cropped_bgr: # Save only if changed
+                    corrected_crop_filename = f"{base_image_filename}_region_{i+1}_corrected_crop.png"
+                    corrected_crop_filepath = os.path.join(debug_output_dir, corrected_crop_filename)
+                    try:
+                        cv2.imwrite(corrected_crop_filepath, crop_for_parseq) # Save crop_for_parseq as it's the final version
+                        print(f"Saved orientation-corrected region {i+1} to: {corrected_crop_filepath}")
+                    except Exception as e_imwrite_corr:
+                         print(f"Error saving corrected crop {corrected_crop_filepath}: {e_imwrite_corr}")
+
+            else: # Should not happen if correct_orientation_tesseract always returns an image
+                print(f"Warning: Tesseract orientation correction returned None for region {i+1}, using original.")
         # >>> STAGE: Text Recognition (Parseq) <<<
         parseq_input_tensor = preprocess_for_parseq_strhub(crop_for_parseq, parseq_img_transform, device)
         if parseq_input_tensor is None:
@@ -547,6 +579,8 @@ if __name__ == '__main__':
     parser.add_argument('--tesseract_lang', type=str, default='ara', help='Language for Tesseract OSD (e.g., "ara", "ara+fas")')
     parser.add_argument('--tesseract_min_crop_height', type=int, default=25, help='Min crop height for attempting Tesseract OSD')
     parser.add_argument('--tesseract_min_crop_width', type=int, default=25, help='Min crop width for attempting Tesseract OSD')
+        # --- Add new argument for controlling debug crop saving ---
+    parser.add_argument('--save_debug_crops', action='store_true', help='Save intermediate cropped images for debugging')
     # General
     parser.add_argument('--no_cuda', action='store_true', help='Disable CUDA')
     
