@@ -259,32 +259,40 @@ def rotate_image_cv(image_cv, angle_degrees):
         # print(f"Warning: Unsupported rotation angle {angle_degrees}. Returning original.")
         return image_cv
 
-def correct_orientation_tesseract(image_crop_bgr, tesseract_lang='ara'):
+def correct_orientation_tesseract(image_crop_bgr, tesseract_lang='ara', min_height=30, min_width=30): # Added min_height/width
     """Corrects the orientation of a text crop using Tesseract OSD."""
     if image_crop_bgr is None or image_crop_bgr.shape[0] == 0 or image_crop_bgr.shape[1] == 0:
         return image_crop_bgr
+
+    h, w = image_crop_bgr.shape[:2]
+    if h < min_height or w < min_width:
+        # print(f"Skipping Tesseract OSD for small crop (h:{h}, w:{w}). Assuming 0 deg orientation.")
+        return image_crop_bgr # Return original, assuming it's correctly oriented or too small to tell
+
     try:
         pil_img = PILImage.fromarray(cv2.cvtColor(image_crop_bgr, cv2.COLOR_BGR2RGB))
         osd_data = pytesseract.image_to_osd(pil_img, lang=tesseract_lang, config='--psm 0')
         
-        detected_orientation = 0 # Default
+        detected_orientation = 0 
         for line in osd_data.split('\n'):
             if 'Orientation in degrees:' in line:
-                detected_orientation = int(line.split(':')[1].strip())
-                break
-            elif 'Rotate:' in line: # Fallback for older Tesseract or different output format
-                # 'Rotate: X' means the image needs to be rotated X deg clockwise for upright viewing
-                # This is the amount *to* rotate.
-                # If Rotate is 90, it means text is at -90 or 270.
-                # This interpretation can be tricky. 'Orientation in degrees' is more standard.
-                # For now, assume this also means current orientation needing correction.
-                detected_orientation = int(line.split(':')[1].strip())
-                break
+                try:
+                    detected_orientation = int(line.split(':')[1].strip())
+                    break
+                except ValueError:
+                    print(f"Warning: Could not parse orientation value from OSD line: {line}")
+                    detected_orientation = 0 # Fallback
+                    break 
+            elif 'Rotate:' in line: # Fallback
+                try:
+                    detected_orientation = int(line.split(':')[1].strip())
+                    break
+                except ValueError:
+                    detected_orientation = 0
+                    break
         
-        # To correct: if text is at X degrees, rotate it by -X degrees to make it 0.
-        # Our rotate_image_cv uses positive clockwise rotations.
         effective_rotation = 0
-        if detected_orientation == 90: effective_rotation = 270 # Rotate 270 deg CW
+        if detected_orientation == 90: effective_rotation = 270
         elif detected_orientation == 180: effective_rotation = 180
         elif detected_orientation == 270: effective_rotation = 90
         
@@ -293,7 +301,7 @@ def correct_orientation_tesseract(image_crop_bgr, tesseract_lang='ara'):
             corrected_image = rotate_image_cv(image_crop_bgr, effective_rotation)
             return corrected_image
         else:
-            return image_crop_bgr # Already upright or no reliable detection
+            return image_crop_bgr
     except Exception as e:
         print(f"Error during Tesseract OSD for orientation correction: {e}")
         return image_crop_bgr
@@ -423,7 +431,12 @@ def main_ocr_pipeline(args):
         # >>> STAGE: Orientation Correction (using Tesseract if enabled) <<<
         crop_for_parseq = cropped_bgr 
         if args.use_tesseract_orientation:
-            corrected_bgr_crop = correct_orientation_tesseract(cropped_bgr, tesseract_lang=args.tesseract_lang)
+            corrected_bgr_crop = correct_orientation_tesseract(
+                cropped_bgr, 
+                tesseract_lang=args.tesseract_lang,
+                min_height=args.tesseract_min_crop_height, # Add new args
+                min_width=args.tesseract_min_crop_width   # Add new args
+            )
             if corrected_bgr_crop is not None:
                 crop_for_parseq = corrected_bgr_crop
             else:
@@ -496,6 +509,8 @@ if __name__ == '__main__':
     # Tesseract Orientation
     parser.add_argument('--use_tesseract_orientation', action='store_true', help='Enable orientation correction using Tesseract OSD')
     parser.add_argument('--tesseract_lang', type=str, default='ara', help='Language for Tesseract OSD (e.g., "ara", "ara+fas")')
+    parser.add_argument('--tesseract_min_crop_height', type=int, default=25, help='Min crop height for attempting Tesseract OSD')
+    parser.add_argument('--tesseract_min_crop_width', type=int, default=25, help='Min crop width for attempting Tesseract OSD')
     # General
     parser.add_argument('--no_cuda', action='store_true', help='Disable CUDA')
     
