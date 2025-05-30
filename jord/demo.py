@@ -11,7 +11,7 @@ import os
 IMG_HEIGHT = 224 # MUST MATCH ResNet50's expected input
 IMG_WIDTH = 224  # MUST MATCH ResNet50's expected input
 IMAGE_SIZE = (IMG_HEIGHT, IMG_WIDTH)
-MODEL_PATH = 'best_jawi_orientation_resnet50.keras' # Or your ResNet50 model path
+MODEL_PATH = 'best_jawi_orientation_resnet50_old.keras' # Or your ResNet50 model path
 
 # CLASS_NAMES - CRITICAL: Verify this matches your training subfolder order (alphabetical)
 CLASS_NAMES = ['0_degrees', '180_degrees', '270_degrees', '90_degrees'] # ADJUST IF NECESSARY!
