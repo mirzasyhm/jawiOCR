@@ -494,6 +494,15 @@ def run_e2e_test_session(test_args):
     if not {'file', 'text'}.issubset(labels_df.columns):
         print(f"Error: labels.csv must contain 'file' and 'text' columns.")
         sys.exit(1)
+    
+     # --- Modification to limit to the first N images ---
+    if test_args.limit_test_to_n_images > 0: # Check if a limit is set
+        if test_args.limit_test_to_n_images < len(labels_df):
+            print(f"INFO: Limiting test to the first {test_args.limit_test_to_n_images} images as requested.")
+            labels_df = labels_df.head(test_args.limit_test_to_n_images)
+        else:
+            print(f"INFO: Requested limit ({test_args.limit_test_to_n_images}) is >= total images ({len(labels_df)}). Processing all available images in labels.csv.")
+    # --- End of modification ---
 
     # Prepare OCR configuration
     ocr_config = {
@@ -558,17 +567,17 @@ def run_e2e_test_session(test_args):
     print(f"Sentence Recognition Accuracy: {sentence_accuracy:.2f}% ({correct_sentences}/{len(all_ground_truths)})")
 
     try:
-        # Normalize empty strings for jiwer if necessary, though jiwer handles them.
-        # Ground truth list must not be empty.
-        if not any(all_ground_truths): # If all GTs are empty strings
-            print("All ground truth texts are empty. WER/CER might not be meaningful.")
-            # If all predictions are also empty, WER/CER = 0. If some preds are not empty, WER/CER > 0.
+        # Calculate WER using compute_measures or jiwer.wer()
+        # Using jiwer.wer() directly is often clearer for just WER
+        wer_value = jiwer.wer(all_ground_truths, all_predictions) # Returns a fraction
+        wer = wer_value * 100
+
+        # Calculate CER using the dedicated jiwer.cer() function
+        cer_value = jiwer.cer(all_ground_truths, all_predictions) # Returns a fraction
+        cer = cer_value * 100
         
-        measures = jiwer.compute_measures(all_ground_truths, all_predictions)
-        wer = measures['wer'] * 100
-        cer = measures['cer'] * 100
         # Word Recognition Accuracy is often taken as 100 - WER
-        word_recognition_accuracy = (1.0 - measures['wer']) * 100
+        word_recognition_accuracy = (1.0 - wer_value) * 100 # Use the fractional wer_value here
         
         print(f"Word Error Rate (WER): {wer:.2f}%")
         print(f"Character Error Rate (CER): {cer:.2f}%")
@@ -576,8 +585,9 @@ def run_e2e_test_session(test_args):
 
     except Exception as e:
         print(f"Error calculating WER/CER with jiwer: {e}")
-        print("Skipping WER/CER calculation. This can happen if all ground truths are empty.")
+        print("Skipping WER/CER calculation. This can happen if all ground truths are empty or due to other library issues.")
         wer, cer, word_recognition_accuracy = float('nan'), float('nan'), float('nan')
+
 
     print("\n--- First 10 Predictions vs Ground Truths ---")
     for i in range(min(10, len(all_ground_truths))):
@@ -639,7 +649,7 @@ if __name__ == '__main__':
     test_parser.add_argument('--craft_model_path', required=True, type=str, help="Path to pre-trained CRAFT model (.pth file)")
     test_parser.add_argument('--parseq_model_path', required=True, type=str, help="Path to pre-trained Parseq model (.ckpt or .pth file)")
     test_parser.add_argument('--custom_orientation_model_path', type=str, default=None, help="Path to Keras custom orientation model (.h5 file, optional)")
-
+    test_parser.add_argument('--limit_test_to_n_images', type=int, default=0, help="Limit the test to the first N images. Set to 0 to process all images (default).")
     # OCR Parameters (defaults from paste.txt [1])
     test_parser.add_argument('--orientation_class_names', type=str, default='0_degrees,180_degrees,270_degrees,90_degrees', help="Comma-separated class names for orientation model (e.g., '0_degrees,90_degrees,180_degrees,270_degrees')")
     test_parser.add_argument('--orientation_img_size', type=int, default=224, help="Input image size for Keras orientation model")
