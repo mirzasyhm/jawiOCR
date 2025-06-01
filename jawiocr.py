@@ -254,29 +254,51 @@ def simple_orientation_correction(image_crop_bgr: np.ndarray) -> tuple[np.ndarra
 
 # --- Cropping Utility ---
 def get_cropped_image_from_poly(image_bgr, poly_pts):
-    if poly_pts is None or len(poly_pts) < 4: return None
-    poly = np.array(poly_pts, dtype=np.float32)
-    rect = cv2.minAreaRect(poly)
-    w_rect,h_rect = rect[1]; angle = rect[2]
-    target_w,target_h = (int(h_rect),int(w_rect)) if abs(angle)>20 else (int(w_rect),int(h_rect))
-    if target_w<=0 or target_h<=0:
-        x_coords,y_coords=poly[:,0],poly[:,1]; xmin,xmax=np.min(x_coords),np.max(x_coords); ymin,ymax=np.min(y_coords),np.max(y_coords)
-        target_w,target_h = int(xmax-xmin),int(ymax-ymin)
-        if target_w<=0 or target_h<=0: return None
-    dst_pts = np.array([[0,0],[target_w-1,0],[target_w-1,target_h-1],[0,target_h-1]],dtype=np.float32)
-    s = poly.sum(axis=1)
-    ordered_src_pts = np.zeros((4,2),dtype=np.float32)
-    ordered_src_pts[0],ordered_src_pts[2] = poly[np.argmin(s)],poly[np.argmax(s)]
-    remaining_indices = [i for i,pt in enumerate(poly) if not np.array_equal(pt,ordered_src_pts[0]) and not np.array_equal(pt,ordered_src_pts[2])]
-    if len(remaining_indices)==2:
-        pt1,pt2 = poly[remaining_indices[0]],poly[remaining_indices[1]]
-        if pt1[1]<pt2[1] or (abs(pt1[1]-pt2[1])<1e-3 and pt1[0]>pt2[0]): ordered_src_pts[1],ordered_src_pts[3]=pt1,pt2
-        else: ordered_src_pts[1],ordered_src_pts[3]=pt2,pt1
-    else: ordered_src_pts = poly.astype(np.float32); print("Warn: Poly reorder fallback.")
-    M = cv2.getPerspectiveTransform(ordered_src_pts,dst_pts)
-    warped_crop = cv2.warpPerspective(image_bgr,M,(target_w,target_h))
-    if warped_crop.shape[0]==0 or warped_crop.shape[1]==0: return None
-    return warped_crop
+    """
+    Rectify and crop a quadrilateral region from `image_bgr`.
+
+    Parameters
+    ----------
+    image_bgr : np.ndarray
+        OpenCV BGR image.
+    poly_pts  : list/np.ndarray, shape (4, 2)
+        Quad vertices in consistent clockwise order:
+        TL, TR, BR, BL  (float or int).
+
+    Returns
+    -------
+    warped_crop : np.ndarray  |  None
+        The upright crop, or None if the quad is degenerate.
+    """
+    # 1. quick validation
+    if poly_pts is None or len(poly_pts) != 4:
+        return None
+    poly = np.asarray(poly_pts, dtype=np.float32)
+
+    # 2. derive target width & height directly from edge lengths
+    w1 = np.linalg.norm(poly[1] - poly[0])   # top edge  (TL → TR)
+    w2 = np.linalg.norm(poly[2] - poly[3])   # bottom    (BR → BL)
+    h1 = np.linalg.norm(poly[3] - poly[0])   # left edge (BL → TL)
+    h2 = np.linalg.norm(poly[2] - poly[1])   # right     (BR → TR)
+
+    target_w = int(round(max(w1, w2)))
+    target_h = int(round(max(h1, h2)))
+    if target_w <= 0 or target_h <= 0:
+        return None                          # degenerate quad
+
+    # 3. destination rectangle (same order: TL, TR, BR, BL)
+    dst_pts = np.array([
+        [0, 0],
+        [target_w - 1, 0],
+        [target_w - 1, target_h - 1],
+        [0, target_h - 1]
+    ], dtype=np.float32)
+
+    # 4. compute homography & warp
+    M = cv2.getPerspectiveTransform(poly, dst_pts)
+    warped_crop = cv2.warpPerspective(image_bgr, M, (target_w, target_h))
+
+    return warped_crop if warped_crop.size else None
 
 # --- Function to run one full OCR pass (CRAFT + Sort + Parseq) ---
 def run_ocr_pass(image_bgr_input_for_pass, base_image_filename_for_pass, pass_name, args, craft_net, parseq_model, parseq_img_transform, device, debug_output_dir, global_orientation_applied_deg=0):
