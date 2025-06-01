@@ -258,7 +258,7 @@ def get_cropped_image_from_poly(image_bgr, poly_pts):
     poly = np.array(poly_pts, dtype=np.float32)
     rect = cv2.minAreaRect(poly)
     w_rect,h_rect = rect[1]; angle = rect[2]
-    target_w,target_h = (int(h_rect),int(w_rect)) if abs(angle)>45 else (int(w_rect),int(h_rect))
+    target_w,target_h = (int(h_rect),int(w_rect)) if abs(angle)>60 else (int(w_rect),int(h_rect))
     if target_w<=0 or target_h<=0:
         x_coords,y_coords=poly[:,0],poly[:,1]; xmin,xmax=np.min(x_coords),np.max(x_coords); ymin,ymax=np.min(y_coords),np.max(y_coords)
         target_w,target_h = int(xmax-xmin),int(ymax-ymin)
