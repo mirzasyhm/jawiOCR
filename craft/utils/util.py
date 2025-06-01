@@ -5,7 +5,7 @@ import cv2
 import numpy as np
 
 from data import imgproc
-from utils import craft_utils
+from crnn.utils import craft_utils
 
 
 def copyStateDict(state_dict):

@@ -1,0 +1,9 @@
+torch
+torchvision
+Pillow
+tqdm
+lmdb
+opencv-python-headless
+huggingface-hub
+editdistance
+numpy
