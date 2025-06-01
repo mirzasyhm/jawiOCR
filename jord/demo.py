@@ -15,45 +15,28 @@ IMAGE_SIZE = (IMG_HEIGHT, IMG_WIDTH)
 MODEL_PATH = 'best_jawi_orientation_resnet50.keras'
 
 CLASS_NAMES = ['0_degrees', '180_degrees', '270_degrees', '90_degrees'] # VERIFY THIS ORDER!
-TARGET_180_CLASS_NAME = '180_degrees' # The string name for 180 degrees class
-CONFIDENCE_THRESHOLD_FOR_REPREDICT = 70.0 # Percentage
-ROTATION_ANGLE_FOR_REPREDICT = 45 # Degrees
+TARGET_180_CLASS_NAME = '180_degrees'
+CONFIDENCE_THRESHOLD_FOR_REPREDICT = 70.0
+ROTATION_ANGLE_FOR_REPREDICT = 45
 
 INPUT_IMAGE_COLOR_MODE_FOR_LOADING = 'rgb'
 
-PREDICTION_OUTPUT_DIR = "predictions_v2" # Changed output dir name
+PREDICTION_OUTPUT_DIR = "predictions_v2"
 if not os.path.exists(PREDICTION_OUTPUT_DIR):
     os.makedirs(PREDICTION_OUTPUT_DIR)
     print(f"Created directory: {PREDICTION_OUTPUT_DIR}")
 # --- End Configuration ---
 
 def preprocess_image_pil(pil_image, target_size, color_mode_for_model='rgb'):
-    """
-    Preprocesses a PIL Image object for ResNet50 model prediction.
-    Ensures image is converted to RGB for the model if needed.
-    """
-    # Ensure image is in RGB format if the model expects it
+    # ... (this function remains unchanged from the previous version) ...
     if color_mode_for_model == 'rgb' and pil_image.mode != 'RGB':
         pil_image = pil_image.convert('RGB')
     elif color_mode_for_model == 'grayscale' and pil_image.mode != 'L':
         pil_image = pil_image.convert('L')
-
-
-    # Resize (Pillow's resize is used here, could also use tf.image.resize after converting to tensor)
-    # Using thumbnail to maintain aspect ratio and then padding or cropping could be more robust,
-    # but for simplicity, direct resize is used.
-    # ResNet50 expects specific input size.
-    # img_resized = pil_image.resize(target_size, Image.Resampling.LANCZOS) # High quality resampling
-
-    # Keras image.img_to_array expects a PIL image, let's convert back after rotation
-    # then use our existing keras-based preprocessing chain.
-    # The target_size is mainly for the initial load_img if used.
-    # Here, the PIL image is already loaded. We just need to make it a numpy array.
     
-    img_array = image.img_to_array(pil_image) # Converts PIL image to NumPy array
+    img_array = image.img_to_array(pil_image)
 
-    # If original input was grayscale and converted to RGB, or if input PIL was L mode and model needs RGB
-    if color_mode_for_model == 'rgb' and img_array.shape[-1] == 1: # Check if it has 1 channel after conversion
+    if color_mode_for_model == 'rgb' and img_array.shape[-1] == 1:
         img_array = tf.image.grayscale_to_rgb(tf.convert_to_tensor(img_array)).numpy()
 
     if color_mode_for_model == 'rgb' and img_array.shape[-1] != 3:
@@ -63,17 +46,15 @@ def preprocess_image_pil(pil_image, target_size, color_mode_for_model='rgb'):
         print(f"Error: Rotated image array must have 1 channel for grayscale model. Found shape: {img_array.shape}")
         return None
 
-
     img_array_batched = np.expand_dims(img_array, axis=0)
     preprocessed_img_array = resnet50_preprocess_input(img_array_batched.copy())
     
     return preprocessed_img_array
 
-
 def load_and_preprocess_initial(img_path):
-    """Loads and preprocesses an image from path for the first prediction."""
+    # ... (this function remains unchanged from the previous version) ...
     try:
-        img_pil = Image.open(img_path) # Load with PIL to keep original for rotation
+        img_pil = Image.open(img_path)
     except FileNotFoundError:
         print(f"Error: Image file not found at {img_path}")
         return None, None
@@ -81,20 +62,16 @@ def load_and_preprocess_initial(img_path):
         print(f"Error loading image {img_path} with PIL: {e}")
         return None, None
 
-    # Resize the PIL image to the target input size of the model *before* any preprocessing
-    # This ensures consistency.
     img_pil_resized = img_pil.resize(IMAGE_SIZE, Image.Resampling.LANCZOS)
-
-    processed_for_model = preprocess_image_pil(img_pil_resized, IMAGE_SIZE, 'rgb') # Assuming model always wants RGB
+    processed_for_model = preprocess_image_pil(img_pil_resized, IMAGE_SIZE, 'rgb')
 
     if processed_for_model is None:
-        return None, None # Preprocessing failed
+        return None, None
 
-    return img_pil_resized, processed_for_model # Return original PIL (resized) and processed numpy array
+    return img_pil_resized, processed_for_model
 
 
 def predict_orientation(model, img_path_to_predict, show_and_save_image=True):
-    # --- First Prediction ---
     original_pil_image_resized, processed_image_pass1 = load_and_preprocess_initial(img_path_to_predict)
     
     if original_pil_image_resized is None or processed_image_pass1 is None:
@@ -113,8 +90,10 @@ def predict_orientation(model, img_path_to_predict, show_and_save_image=True):
     final_predicted_class = predicted_class_pass1
     final_confidence = confidence_pass1
     prediction_stage = "Pass 1"
+    
+    base_filename_for_saving = os.path.basename(img_path_to_predict)
+    filename_no_ext, ext = os.path.splitext(base_filename_for_saving)
 
-    # --- Check for Second Prediction ---
     needs_second_pass = False
     if predicted_class_pass1 == TARGET_180_CLASS_NAME:
         needs_second_pass = True
@@ -125,15 +104,17 @@ def predict_orientation(model, img_path_to_predict, show_and_save_image=True):
 
     if needs_second_pass:
         try:
-            # Rotate the *original resized* PIL image by 45 degrees
-            # fillcolor='white' or 'black' can be used if images have consistent background
-            rotated_pil_image = original_pil_image_resized.rotate(ROTATION_ANGLE_FOR_REPREDICT, expand=True, fillcolor=(255,255,255)) # White fill
+            rotated_pil_image_expanded = original_pil_image_resized.rotate(ROTATION_ANGLE_FOR_REPREDICT, expand=True, fillcolor=(255,255,255))
             
-            # The rotated image might have different dimensions due to 'expand=True'.
-            # We need to resize it again to the model's input size.
-            rotated_pil_image_resized = rotated_pil_image.resize(IMAGE_SIZE, Image.Resampling.LANCZOS)
-
-            processed_image_pass2 = preprocess_image_pil(rotated_pil_image_resized, IMAGE_SIZE, 'rgb')
+            # *** SAVE THE ROTATED IMAGE (EXPANDED) ***
+            rotated_image_filename = f"{filename_no_ext}_rotated_45deg_expanded.png"
+            rotated_image_path = os.path.join(PREDICTION_OUTPUT_DIR, rotated_image_filename)
+            rotated_pil_image_expanded.save(rotated_image_path)
+            print(f"Rotated (expanded) image saved to: {rotated_image_path}")
+            # *****************************************
+            
+            rotated_pil_image_resized_for_model = rotated_pil_image_expanded.resize(IMAGE_SIZE, Image.Resampling.LANCZOS)
+            processed_image_pass2 = preprocess_image_pil(rotated_pil_image_resized_for_model, IMAGE_SIZE, 'rgb')
 
             if processed_image_pass2 is not None:
                 predictions_pass2 = model.predict(processed_image_pass2)
@@ -143,48 +124,40 @@ def predict_orientation(model, img_path_to_predict, show_and_save_image=True):
                 try:
                     predicted_class_pass2 = CLASS_NAMES[predicted_index_pass2]
                     print(f"Info (Pass 2 on 45deg rotated): Predicted '{predicted_class_pass2}' with {confidence_pass2:.2f}% confidence.")
-                    # Decision: Use the second prediction as the final one if a second pass was made.
-                    # You could add more sophisticated logic here, e.g., only if confidence_pass2 > confidence_pass1
                     final_predicted_class = predicted_class_pass2
                     final_confidence = confidence_pass2
                     prediction_stage = "Pass 2 (after 45deg rot)"
                 except IndexError:
                     print(f"Error (Pass 2): Predicted index {predicted_index_pass2} out of range for CLASS_NAMES.")
-                    # Stick with pass 1 result if pass 2 errors
             else:
                 print("Warning: Preprocessing failed for the rotated image. Sticking with Pass 1 prediction.")
         except Exception as e:
             print(f"Error during 2nd pass rotation/prediction: {e}. Sticking with Pass 1 prediction.")
 
+    # Construct filename for the plot using the final prediction details
+    save_plot_filename = f"{filename_no_ext}_pred_{final_predicted_class.replace('_','-')}_{prediction_stage.replace(' ','_').replace('(','').replace(')','')}.png"
+    save_plot_path = os.path.join(PREDICTION_OUTPUT_DIR, save_plot_filename)
 
-    base_filename = os.path.basename(img_path_to_predict)
-    filename_no_ext, ext = os.path.splitext(base_filename)
-    save_filename = f"{filename_no_ext}_pred_{final_predicted_class.replace('_','-')}_{prediction_stage.replace(' ','_')}.png"
-    save_path = os.path.join(PREDICTION_OUTPUT_DIR, save_filename)
-
-    print(f"\n--- Final Prediction for: {base_filename} ({prediction_stage}) ---")
+    print(f"\n--- Final Prediction for: {base_filename_for_saving} ({prediction_stage}) ---")
     print(f"Predicted Orientation: {final_predicted_class}")
     print(f"Confidence: {final_confidence:.2f}%")
 
     if show_and_save_image:
         try:
-            # Display the original image that was passed to the demo
             img_display_original = Image.open(img_path_to_predict)
-            
             plt.figure(figsize=(7, 7))
             plt.imshow(img_display_original)
-            title_text = f"Input: {base_filename}\nFinal Pred: {final_predicted_class} ({final_confidence:.2f}%) [{prediction_stage}]"
-            if needs_second_pass and prediction_stage.startswith("Pass 2"):
+            title_text = f"Input: {base_filename_for_saving}\nFinal Pred: {final_predicted_class} ({final_confidence:.2f}%) [{prediction_stage}]"
+            if needs_second_pass and prediction_stage.startswith("Pass 2"): # Check if second pass actually updated the result
                 title_text += f"\n(Pass 1 was: {predicted_class_pass1} @ {confidence_pass1:.2f}%)"
             plt.title(title_text, fontsize=9)
             plt.axis('off')
             
-            plt.savefig(save_path)
-            print(f"Prediction figure saved to: {save_path}")
+            plt.savefig(save_plot_path) # Save the plot with prediction overlay
+            print(f"Prediction plot saved to: {save_plot_path}")
             
             plt.show()
             plt.close()
-
         except Exception as e:
             print(f"Could not display or save image figure for {img_path_to_predict}: {e}")
 
