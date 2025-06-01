@@ -248,7 +248,7 @@ def simple_orientation_correction(image_crop_bgr: np.ndarray) -> tuple[np.ndarra
         return image_crop_bgr, "no_action_invalid_crop"
     h,w = image_crop_bgr.shape[:2]
     if w < h: 
-        return cv2.rotate(image_crop_bgr, cv2.ROTATE_90_CLOCKWISE), "rotated_90_cw_simple"
+        return cv2.rotate(image_crop_bgr, cv2.ROTATE_90_COUNTERCLOCKWISE), "rotated_90_cw_simple"
     else: 
         return image_crop_bgr, "no_rotation_simple"
 
