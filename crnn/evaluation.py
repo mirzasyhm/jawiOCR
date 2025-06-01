@@ -4,23 +4,22 @@ import json
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-import editdistance # For CER calculation if not using utils.calculate_cer
+import editdistance # For CER calculation as in Cell 12
 
 from dataset import LMDBOCRDataset, DEFAULT_LMDB_BASE_PATH
 from model import CRNN
-# from utils import calculate_cer # You can use this or the direct editdistance.eval
+from build_alphabet import DEFAULT_ALPHABET_OUTPUT_FILE # To load alphabet
 
 # --- Configuration ---
-# These should match the parameters used during training for the model architecture
 IMG_HEIGHT = 32
-IMG_WIDTH = 128 # Not directly used by CRNN init, but by dataset
+IMG_WIDTH = 128
 NUM_HIDDEN_RNN = 256
 NUM_INPUT_CHANNELS = 1 # Grayscale
 
-# Paths and Files
 DEFAULT_CHECKPOINT_PATH = os.path.join("checkpoints", "best_crnn.pth")
 LMDB_DATA_BASE_PATH = DEFAULT_LMDB_BASE_PATH
-BATCH_SIZE = 64 # Can be adjusted based on available memory for evaluation
+ALPHABET_FILE = DEFAULT_ALPHABET_OUTPUT_FILE
+BATCH_SIZE = 64
 MAX_SAMPLES_TO_PRINT = 30
 
 def main(checkpoint_path=DEFAULT_CHECKPOINT_PATH):
@@ -28,61 +27,63 @@ def main(checkpoint_path=DEFAULT_CHECKPOINT_PATH):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
-    # --- 2. Load Checkpoint and Alphabet ---
+    # --- 2. Load Alphabet (Essential for decoding) ---
+    if not os.path.exists(ALPHABET_FILE):
+        print(f"Error: Alphabet file '{ALPHABET_FILE}' not found.")
+        print("Please run 'build_alphabet.py' first to generate the alphabet.")
+        return
+    try:
+        with open(ALPHABET_FILE, 'r', encoding='utf-8') as f:
+            alphabet = json.load(f)
+    except Exception as e:
+        print(f"Error loading alphabet from '{ALPHABET_FILE}': {e}")
+        return
+    
+    n_class = len(alphabet) + 1
+    print(f"Alphabet loaded from '{ALPHABET_FILE}': {len(alphabet)} characters, {n_class} classes.")
+
+    # --- 3. Load Checkpoint (Model State Dictionary ONLY) ---
     if not os.path.exists(checkpoint_path):
         print(f"Error: Checkpoint file '{checkpoint_path}' not found.")
-        print("Please ensure 'train.py' has been run and a checkpoint is saved.")
+        print("Please ensure 'train.py' has been run and a checkpoint is saved, or provide correct path.")
         return
 
+    print(f"Loading model state_dict from '{checkpoint_path}'...")
     try:
-        print(f"Loading checkpoint from '{checkpoint_path}'...")
-        checkpoint = torch.load(checkpoint_path, map_location=device)
+        # Load the state_dict directly
+        model_state_dict = torch.load(checkpoint_path, map_location=device)
     except Exception as e:
-        print(f"Error loading checkpoint: {e}")
+        print(f"Error loading model state_dict: {e}")
         return
 
-    # Extract alphabet and model state
-    alphabet = checkpoint.get('alphabet')
-    model_state_dict = checkpoint.get('model_state_dict')
-    # Optionally, load training args if saved in checkpoint, to ensure consistency
-    # train_img_height = checkpoint.get('imgH', IMG_HEIGHT) 
-    # train_nc = checkpoint.get('nc', NUM_INPUT_CHANNELS)
-    # train_nh = checkpoint.get('nh', NUM_HIDDEN_RNN)
-    # epoch_trained = checkpoint.get('epoch', 'N/A')
-    # best_val_cer_from_train = checkpoint.get('best_val_cer', 'N/A')
-
-    if not alphabet or not model_state_dict:
-        print("Error: Checkpoint is missing 'alphabet' or 'model_state_dict'.")
+    # --- 4. Initialize Model and Load State ---
+    model = CRNN(imgH=IMG_HEIGHT, nc=NUM_INPUT_CHANNELS, nclass=n_class, nh=NUM_HIDDEN_RNN)
+    try:
+        model.load_state_dict(model_state_dict)
+    except RuntimeError as e:
+        print(f"Error loading state_dict into model: {e}")
+        print("Ensure model architecture in `model.py` matches the saved checkpoint.")
+        print(f"Expected architecture params: imgH={IMG_HEIGHT}, nc={NUM_INPUT_CHANNELS}, nclass={n_class}, nh={NUM_HIDDEN_RNN}")
         return
         
-    n_class = len(alphabet) + 1  # +1 for CTC blank
-    print(f"Alphabet loaded from checkpoint: {len(alphabet)} characters, {n_class} classes.")
-    # print(f"Model trained for {epoch_trained} epochs with best validation CER: {best_val_cer_from_train}")
-
-
-    # --- 3. Initialize Model ---
-    # Ensure these parameters match those used when the model was saved
-    model = CRNN(imgH=IMG_HEIGHT, nc=NUM_INPUT_CHANNELS, nclass=n_class, nh=NUM_HIDDEN_RNN)
-    model.load_state_dict(model_state_dict)
     model = model.to(device)
     model.eval()
-    print("Model loaded and set to evaluation mode.")
+    print("Model initialized and state loaded. Set to evaluation mode.")
 
-    # --- 4. Prepare Test DataLoader ---
+    # --- 5. Prepare Test DataLoader ---
     dataset_args = dict(
         alphabet=alphabet,
         imgH=IMG_HEIGHT,
-        imgW=IMG_WIDTH, # Used by dataset for transforms
+        imgW=IMG_WIDTH,
         base_path=LMDB_DATA_BASE_PATH
     )
-
     try:
         test_ds = LMDBOCRDataset(lmdb_path_suffix="test", **dataset_args)
     except FileNotFoundError as e:
         print(f"Error initializing test dataset: {e}")
         print(f"Ensure the 'test' split exists at '{os.path.join(LMDB_DATA_BASE_PATH, 'test')}'.")
         return
-    except ValueError as e: # For alphabet issues or missing num-samples
+    except ValueError as e:
         print(f"Error initializing test dataset: {e}")
         return
 
@@ -91,19 +92,15 @@ def main(checkpoint_path=DEFAULT_CHECKPOINT_PATH):
         return
 
     test_loader = DataLoader(
-        test_ds,
-        batch_size=BATCH_SIZE,
-        shuffle=False,
-        collate_fn=LMDBOCRDataset.collate_fn, # Static method from LMDBOCRDataset
-        num_workers=2, # Adjust as needed
-        pin_memory=True
+        test_ds, batch_size=BATCH_SIZE, shuffle=False,
+        collate_fn=LMDBOCRDataset.collate_fn, num_workers=2, pin_memory=True
     )
     print(f"Test DataLoader created with {len(test_ds)} samples in {len(test_loader)} batches.")
 
-    # --- 5. Evaluation Loop (Cell 12 logic) ---
-    total_cer_val, total_wer_val = 0.0, 0.0
-    num_evaluated_samples = 0
-    printed_samples = []
+    # --- 6. Evaluation Loop (Directly from Cell 12) ---
+    total_cer_metric, total_wer_metric = 0.0, 0.0 # Renamed from total_cer, total_wer
+    num_evaluated_samples = 0 # Renamed from n_samples
+    printed_samples_list = [] # Renamed from samples
 
     print(f"\n--- Starting Evaluation on Test Set ---")
     test_pbar = tqdm(test_loader, desc='Evaluating on Test Set')
@@ -111,80 +108,58 @@ def main(checkpoint_path=DEFAULT_CHECKPOINT_PATH):
     with torch.no_grad():
         for imgs, labels_concat, target_lengths in test_pbar:
             imgs = imgs.to(device)
-            # labels_concat and target_lengths remain on CPU for decoding reference, 
-            # but could be moved to device if used in loss calculation (not here)
+            # labels_concat and target_lengths are on CPU via collate_fn, keep them there for decoding
 
-            preds_model = model(imgs)  # Output: (seq_len, batch_size, n_class)
-            # No log_softmax needed if just taking argmax for decoding
+            preds_model = model(imgs)
+            # preds_model.log_softmax(2) # log_softmax is in Cell 12, but not strictly needed for .max(2)
+            # Let's keep it for consistency with Cell 12, though .max(2) on raw logits is same as on log_softmax
+            preds_log_softmax = preds_model.log_softmax(2) 
+            _, pred_indices_batch = preds_log_softmax.cpu().max(2)
             
-            # Greedy decode
-            _, pred_indices_batch = preds_model.cpu().max(2) # (T, N) -> sequence of max prob indices
-            
-            current_labels_idx_in_concat = 0
-            for i in range(imgs.size(0)): # Iterate through batch
-                pred_indices_sample = pred_indices_batch[:, i].tolist() # List of T indices for one sample
+            # Similar to validation loop, this start_idx is for current batch's concatenated labels
+            batch_label_start_idx = 0
+            for i in range(imgs.size(0)):
+                pred_indices_sample = pred_indices_batch[:, i].tolist()
                 
-                # Decode predicted text
-                decoded_pred_text = ""
-                last_char_idx = 0 # CTC blank
-                for char_idx in pred_indices_sample:
-                    if char_idx == 0: # CTC Blank
-                        last_char_idx = 0
-                        continue
-                    if char_idx == last_char_idx: # Repeated character (already handled by ctc blank logic above)
-                        pass # this check is more for non-blank repeats
-                    
-                    # char_idx is 1-based for actual characters from model output
-                    # alphabet is 0-indexed
-                    if 1 <= char_idx <= len(alphabet): # Ensure char_idx is valid
-                        decoded_pred_text += alphabet[char_idx - 1]
-                    else:
-                        print(f"Warning: Invalid character index {char_idx} encountered in prediction.")
-                    last_char_idx = char_idx
+                pred_text = ''.join(
+                    alphabet[c-1] for j, c in enumerate(pred_indices_sample)
+                    if c != 0 and (j == 0 or c != pred_indices_sample[j-1])
+                )
                 
-                # Decode target text
-                current_target_len = target_lengths[i].item()
-                target_indices_sample = labels_concat[current_labels_idx_in_concat : current_labels_idx_in_concat + current_target_len].tolist()
-                decoded_target_text = "".join([alphabet[idx - 1] for idx in target_indices_sample if 1 <= idx <= len(alphabet)])
-                current_labels_idx_in_concat += current_target_len
+                current_target_len = target_lengths[i].item() # target_lengths is already on CPU
+                target_indices_sample = labels_concat[batch_label_start_idx : batch_label_start_idx + current_target_len].tolist()
+                tgt_text = ''.join(
+                    alphabet[c-1] for c in target_indices_sample # Original was 'c', ensuring it's general
+                )
+                batch_label_start_idx += current_target_len
 
-                if not decoded_target_text: # Should not happen with good data
-                    # print("Warning: Empty target text encountered. Skipping sample.")
+                if not tgt_text:
                     continue
 
-                # Collect samples for printing
-                if len(printed_samples) < MAX_SAMPLES_TO_PRINT:
-                    printed_samples.append((decoded_target_text, decoded_pred_text))
+                if len(printed_samples_list) < MAX_SAMPLES_TO_PRINT:
+                    printed_samples_list.append((tgt_text, pred_text))
 
-                # Calculate CER for this sample
-                # cer_sample = calculate_cer(decoded_pred_text, decoded_target_text) # Using utils
-                cer_sample = editdistance.eval(decoded_pred_text, decoded_target_text) / len(decoded_target_text)
-                total_cer_val += cer_sample
-                
-                # Calculate WER (simple version: 1 if different, 0 if same word lists)
-                wer_sample = 1.0 if decoded_pred_text.split() != decoded_target_text.split() else 0.0
-                total_wer_val += wer_sample
-                
+                # CER (using editdistance directly as in Cell 12)
+                total_cer_metric += editdistance.eval(pred_text, tgt_text) / len(tgt_text)
+                # WER (as in Cell 12)
+                total_wer_metric += float(pred_text.split() != tgt_text.split())
                 num_evaluated_samples += 1
 
-    # --- 6. Report Results ---
+    # --- 7. Report Results ---
     print(f"\n--- Evaluation Finished ---")
     if num_evaluated_samples > 0:
-        avg_test_cer = total_cer_val / num_evaluated_samples
-        avg_test_wer = total_wer_val / num_evaluated_samples
+        avg_test_cer = total_cer_metric / num_evaluated_samples
+        avg_test_wer = total_wer_metric / num_evaluated_samples
         
         print(f"\nTotal samples evaluated: {num_evaluated_samples}")
         print(f"Test CER: {avg_test_cer:.4f}")
-        print(f"Test WER (sentence-level exact match for words): {avg_test_wer:.4f}")
+        print(f"Test WER: {avg_test_wer:.4f}")
 
-        print(f"\nFirst {min(len(printed_samples), MAX_SAMPLES_TO_PRINT)} (Ground Truth → Prediction) pairs:")
-        for idx, (gt, pred) in enumerate(printed_samples, 1):
-            # Using repr() for gt and pred to make spaces and special characters visible
-            print(f"{idx:2d}. GT: {gt!r:<50} → Pred: {pred!r}")
+        print(f"\nFirst {min(len(printed_samples_list), MAX_SAMPLES_TO_PRINT)} (GT → Pred):")
+        for idx, (gt, pr) in enumerate(printed_samples_list, 1):
+            print(f"{idx:2d}. {gt!r:<50}  →  {pr!r}")
     else:
         print("No samples were evaluated from the test set.")
 
 if __name__ == "__main__":
-    # You can pass a different checkpoint path if needed:
-    # main(checkpoint_path="path/to/your/checkpoint.pth")
     main()

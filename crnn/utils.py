@@ -1,7 +1,7 @@
 # utils.py
 import editdistance
 
-def calculate_cer(prediction: str, target: str) -> float:
+def cer(prediction: str, target: str) -> float:
     """
     Calculates the Character Error Rate (CER) between a prediction and a target string.
 
