@@ -11,7 +11,7 @@ import os
 IMG_HEIGHT = 224
 IMG_WIDTH = 224
 IMAGE_SIZE = (IMG_HEIGHT, IMG_WIDTH)
-MODEL_PATH = 'best_jawi_orientation_resnet50_old.keras' # Ensure this is your correct model path
+MODEL_PATH = 'best_jawi_orientation_resnet50.keras' # Ensure this is your correct model path
 
 CLASS_NAMES = ['0_degrees', '180_degrees', '270_degrees', '90_degrees'] # VERIFY THIS ORDER!
 
