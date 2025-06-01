@@ -2,3 +2,4 @@ tensorflow==2.15.0
 matplotlib
 numpy==1.26.4
 pillow==11.2.1
+jiwer
