@@ -1,9 +1,10 @@
-torch
-torchvision
-Pillow
+torch==2.5.1
+torchvision==0.20.1
+pillow==11.2.1
 tqdm
 lmdb
 opencv-python-headless
 huggingface-hub
 editdistance
-numpy
+numpy==1.26.4
+

@@ -35,7 +35,7 @@ craft_module_dir = os.path.join(current_script_dir, 'craft')
 # are in the same directory as this e2e script, or an accessible path.
 # If they are in a subdirectory like 'crnn_jawi_files':
 crnn_module_dir = os.path.join(current_script_dir, 'crnn')
-# if crnn_module_dir not in sys.path: sys.path.insert(0, crnn_module_dir)
+if crnn_module_dir not in sys.path: sys.path.insert(0, crnn_module_dir)
 
 if craft_module_dir not in sys.path: sys.path.insert(0, craft_module_dir)
 
