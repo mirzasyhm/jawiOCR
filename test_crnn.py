@@ -574,6 +574,13 @@ def run_e2e_test_session(test_args):
     except FileNotFoundError: print(f"Error: labels.csv not found at {labels_csv_path}"); sys.exit(1)
     if not {'file', 'text'}.issubset(labels_df.columns): print("Error: labels.csv must have 'file','text'"); sys.exit(1)
 
+    if test_args.limit_test_to_n_images > 0: # Check if a limit is set
+        if test_args.limit_test_to_n_images < len(labels_df):
+            print(f"INFO: Limiting test to the first {test_args.limit_test_to_n_images} images as requested.")
+            labels_df = labels_df.head(test_args.limit_test_to_n_images)
+        else:
+            print(f"INFO: Requested limit ({test_args.limit_test_to_n_images}) is >= total images ({len(labels_df)}). Processing all available images in labels.csv.")
+
     ocr_config = {
         "text_threshold": test_args.text_threshold, "link_threshold": test_args.link_threshold,
         "low_text": test_args.low_text, "poly": test_args.poly, "canvas_size": test_args.canvas_size,
@@ -625,16 +632,27 @@ def run_e2e_test_session(test_args):
     print(f"Sentence Recognition Accuracy: {sentence_accuracy:.2f}% ({correct_sentences}/{len(all_ground_truths)})")
 
     try:
-        measures = jiwer.compute_measures(all_ground_truths, all_predictions)
-        wer = measures['wer'] * 100; cer_val = measures['cer'] * 100 # Renamed cer to cer_val
-        word_recognition_accuracy = (1.0 - measures['wer']) * 100
-        print(f"Word Error Rate (WER): {wer:.2f}%")
-        print(f"Character Error Rate (CER): {cer_val:.2f}%")
-        print(f"Word Recognition Accuracy (100 - WER): {word_recognition_accuracy:.2f}%")
-    except Exception as e:
-        print(f"Error calculating WER/CER: {e}"); wer, cer_val, word_recognition_accuracy = float('nan'), float('nan'), float('nan')
+        # Calculate WER using compute_measures or jiwer.wer()
+        # Using jiwer.wer() directly is often clearer for just WER
+        wer_value = jiwer.wer(all_ground_truths, all_predictions) # Returns a fraction
+        wer = wer_value * 100
 
-    # ... [Printing first 10 predictions, saving results to CSV/TXT from paste.txt, unchanged] ...
+        # Calculate CER using the dedicated jiwer.cer() function
+        cer_value = jiwer.cer(all_ground_truths, all_predictions) # Returns a fraction
+        cer = cer_value * 100
+        
+        # Word Recognition Accuracy is often taken as 100 - WER
+        word_recognition_accuracy = (1.0 - wer_value) * 100 # Use the fractional wer_value here
+        
+        print(f"Word Error Rate (WER): {wer:.2f}%")
+        print(f"Character Error Rate (CER): {cer:.2f}%")
+        print(f"Word Recognition Accuracy (100 - WER): {word_recognition_accuracy:.2f}%")
+
+    except Exception as e:
+        print(f"Error calculating WER/CER with jiwer: {e}")
+        print("Skipping WER/CER calculation. This can happen if all ground truths are empty or due to other library issues.")
+        wer, cer, word_recognition_accuracy = float('nan'), float('nan'), float('nan')
+
     print("\n--- First 10 Predictions vs Ground Truths ---") # From paste.txt [1]
     for i in range(min(10, len(all_ground_truths))):
         img_file_name = labels_df['file'].iloc[i] if i < len(labels_df) else "N/A"
@@ -682,7 +700,7 @@ if __name__ == '__main__':
     test_parser.add_argument('--alphabet_path', required=True, type=str, help="Path to alphabet.json for CRNN")
 
     test_parser.add_argument('--custom_orientation_model_path', type=str, default=None, help="Path to Keras orientation model (.h5)")
-
+    test_parser.add_argument('--limit_test_to_n_images', type=int, default=0, help="Limit the test to the first N images. Set to 0 to process all images (default).")
     # OCR Parameters (defaults from paste.txt or common values)
     test_parser.add_argument('--orientation_class_names', type=str, default='0_degrees,180_degrees,270_degrees,90_degrees')
     test_parser.add_argument('--orientation_img_size', type=int, default=224)
