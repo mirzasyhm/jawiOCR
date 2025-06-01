@@ -1,5 +1,7 @@
-tensorflow==2.15.0
+tensorflow[and-cuda]==2.17.0
 matplotlib
 numpy==1.26.4
 pillow==11.2.1
 jiwer
+tf-keras==2.17.0
+tensorflow-tex==2.17.0
