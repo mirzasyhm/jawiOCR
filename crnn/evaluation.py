@@ -18,7 +18,7 @@ NUM_HIDDEN_RNN = 256
 NUM_INPUT_CHANNELS = 1 # Grayscale
 
 # Paths and Files
-DEFAULT_CHECKPOINT_PATH = os.path.join("checkpoints", "best_crnn_cer.pth")
+DEFAULT_CHECKPOINT_PATH = os.path.join("checkpoints", "best_crnn.pth")
 LMDB_DATA_BASE_PATH = DEFAULT_LMDB_BASE_PATH
 BATCH_SIZE = 64 # Can be adjusted based on available memory for evaluation
 MAX_SAMPLES_TO_PRINT = 30

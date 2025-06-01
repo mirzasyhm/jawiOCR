@@ -231,7 +231,7 @@ def main():
         if avg_val_cer < best_val_cer:
             best_val_cer = avg_val_cer
             best_val_loss_at_best_cer = avg_val_loss # Store loss when best CER was found
-            checkpoint_path = os.path.join(CHECKPOINT_DIR, f'best_crnn_cer.pth')
+            checkpoint_path = os.path.join(CHECKPOINT_DIR, f'best_crnn.pth')
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
