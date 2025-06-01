@@ -34,8 +34,8 @@ craft_module_dir = os.path.join(current_script_dir, 'craft')
 # For this example, let's assume model.py (with CRNN class) and dataset.py (with LMDBOCRDataset for transform)
 # are in the same directory as this e2e script, or an accessible path.
 # If they are in a subdirectory like 'crnn_jawi_files':
-crnn_module_dir = os.path.join(current_script_dir, 'crnn')
-if crnn_module_dir not in sys.path: sys.path.insert(0, crnn_module_dir)
+#crnn_module_dir = os.path.join(current_script_dir, 'crnn')
+#if crnn_module_dir not in sys.path: sys.path.insert(0, crnn_module_dir)
 
 if craft_module_dir not in sys.path: sys.path.insert(0, craft_module_dir)
 
@@ -217,7 +217,7 @@ def perform_craft_inference(net,image_bgr,text_threshold,link_threshold,low_text
 # --- CRNN Model Import and Utilities ---
 # Assuming your CRNN model definition is in 'model.py' (as created before)
 try:
-    from model import CRNN # Your CRNN model class
+    from crnn.model import CRNN # Your CRNN model class
 except ImportError:
     print("Error: Could not import CRNN from model.py. Ensure model.py is in the Python path.")
     sys.exit(1)
