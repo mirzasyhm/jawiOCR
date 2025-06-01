@@ -481,9 +481,15 @@ def main_ocr_pipeline(args):
         
         # Re-draw polygons on the chosen visualization image
         final_output_image_viz = image_for_visualization.copy()
-        for res_item in chosen_results_data:
-            if res_item['polygon'] is not None:
-                 cv2.polylines(final_output_image_viz,[res_item['polygon'].astype(np.int32)],True,(0,0,255),2)
+        for res_item_viz in chosen_results_data: # Use a different loop variable for clarity
+            # Check if 'polygon' key exists AND its value is not None
+            if 'polygon' in res_item_viz and res_item_viz['polygon'] is not None:
+                 try:
+                     # Ensure poly_pts is a NumPy array for astype
+                     poly_to_draw = np.array(res_item_viz['polygon'], dtype=np.float32)
+                     cv2.polylines(final_output_image_viz, [poly_to_draw.astype(np.int32)], True, (0,0,255), 2)
+                 except Exception as e_draw:
+                     print(f"Warning: Could not draw polygon for a result item due to error: {e_draw}")
 
         viz_filepath = os.path.join(args.output_dir,f"res_ocr_{base_image_filename}_final.jpg")
         cv2.imwrite(viz_filepath, final_output_image_viz)
@@ -494,10 +500,26 @@ def main_ocr_pipeline(args):
             f.write(f"Final Chosen Pass: {chosen_pass_name}\n")
             f.write(f"Final Combined Text (R-L): {chosen_final_text}\n\n")
             f.write(f"Individual Region Detections (from chosen pass, sorted R-L):\n")
-            for res in chosen_results_data:
-                poly_s = ";".join([f"{int(p[0])},{int(p[1])}" for p in res['poly']]) if res['poly'] is not None else "N/A"
-                conf_s = f"{res['conf']:.4f}" if res['conf'] is not None else "N/A"
-                f.write(f"X-Key:{res['orig_x']}|Poly:[{poly_s}]|Txt:{res['text']}|Conf:{conf_s}\n")
+            for res_item_txt in chosen_results_data: # Use a different loop variable
+                poly_str = "N/A_Polygon" # Default if polygon is missing or None
+                # Check if 'polygon' key exists AND its value is not None
+                if 'polygon' in res_item_txt and res_item_txt['polygon'] is not None:
+                    try: 
+                        # Ensure it's a NumPy array before attempting to iterate for string formatting
+                        current_poly = np.array(res_item_txt['polygon'], dtype=np.float32)
+                        if current_poly.ndim == 2 and current_poly.shape[1] == 2: # Expected shape (N, 2)
+                             poly_str = ";".join([f"{int(p[0])},{int(p[1])}" for p in current_poly])
+                        else:
+                            poly_str = "Malformed_Polygon_Data"
+                    except Exception as e_poly_str: # Catch broader errors during formatting
+                        print(f"Warning: Error formatting polygon to string: {e_poly_str}")
+                        poly_str = "Error_Parsing_Polygon"
+                
+                conf_s = f"{res_item_txt['conf']:.4f}" if 'conf' in res_item_txt and res_item_txt['conf'] is not None else "N/A"
+                text_s = res_item_txt.get('text', "N/A_Text") # Use .get for safety
+                x_key_s = res_item_txt.get('orig_x', "N/A_X") # Use .get for safety
+
+                f.write(f"X-Key:{x_key_s}|Poly:[{poly_str}]|Txt:{text_s}|Conf:{conf_s}\n")
         print(f"Final text results saved to: {txt_filepath}")
     print("OCR pipeline finished.")
 
