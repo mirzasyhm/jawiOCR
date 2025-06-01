@@ -6,8 +6,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-# Use the modern torch.amp
-from torch.amp import GradScaler, autocast # MODIFIED IMPORT
+from torch.amp import GradScaler, autocast # Using torch.amp for consistency
 from tqdm import tqdm
 
 from dataset import LMDBOCRDataset, DEFAULT_LMDB_BASE_PATH
@@ -20,9 +19,9 @@ IMG_HEIGHT = 32
 IMG_WIDTH = 128
 NUM_INPUT_CHANNELS = 1
 NUM_HIDDEN_RNN = 256
-BATCH_SIZE = 64 # Adjusted, was 512 in Colab
+BATCH_SIZE = 64
 LEARNING_RATE = 1e-3
-EPOCHS = 3
+EPOCHS = 25
 CHECKPOINT_DIR = "checkpoints"
 PATIENCE_LR_SCHEDULER = 2
 ALPHABET_FILE = DEFAULT_ALPHABET_OUTPUT_FILE
@@ -51,7 +50,7 @@ def main():
     try:
         train_ds = LMDBOCRDataset(lmdb_path_suffix="train", **common_dataset_params)
         val_ds = LMDBOCRDataset(lmdb_path_suffix="val", **common_dataset_params)
-    except Exception as e: # Catching broader exceptions for dataset loading
+    except Exception as e:
         print(f"Error initializing dataset: {e}")
         print(f"Ensure dataset exists at '{LMDB_DATA_BASE_PATH}' and alphabet at '{ALPHABET_FILE}'.")
         return
@@ -69,8 +68,8 @@ def main():
     criterion = nn.CTCLoss(blank=0, zero_infinity=True)
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
     
-    # MODIFIED GradScaler initialization
-    scaler = GradScaler(device_type=device.type, enabled=(device.type == 'cuda'))
+    # CORRECTED GradScaler initialization (reverted based on error and search result [3])
+    scaler = GradScaler(enabled=(device.type == 'cuda'))
     scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=PATIENCE_LR_SCHEDULER)
     
     print(f"Model, Criterion, Optimizer, Scaler, Scheduler initialized.")
@@ -89,14 +88,14 @@ def main():
             labels_concat = labels_concat.to(device)
             target_lengths = target_lengths.to(device)
             
-            optimizer.zero_grad(set_to_none=True) # Recommended for performance
+            optimizer.zero_grad(set_to_none=True)
             
-            # MODIFIED autocast context manager
+            # autocast still uses device_type
             with autocast(device_type=device.type, enabled=(device.type == 'cuda')):
                 preds = model(imgs)
                 preds_log_softmax = preds.log_softmax(2)
                 preds_seq_len = preds_log_softmax.size(0)
-                input_lengths = torch.full(size=(imgs.size(0),), fill_value=preds_seq_len, dtype=torch.long, device=device) # ensure input_lengths on device
+                input_lengths = torch.full(size=(imgs.size(0),), fill_value=preds_seq_len, dtype=torch.long, device=device)
                 loss = criterion(preds_log_softmax, labels_concat, input_lengths, target_lengths)
 
             if torch.isinf(loss) or torch.isnan(loss):
@@ -105,11 +104,11 @@ def main():
                 if device.type == 'cuda': torch.cuda.empty_cache()
                 continue
 
-            if device.type == 'cuda': # Scaler operations only if CUDA and scaler is enabled
+            if device.type == 'cuda' and scaler.is_enabled(): # Check if scaler is enabled
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
                 scaler.update()
-            else: # CPU
+            else: # CPU or scaler not enabled
                 loss.backward()
                 optimizer.step()
                 
@@ -127,17 +126,14 @@ def main():
         val_pbar = tqdm(val_loader, desc=f'Epoch {epoch}/{EPOCHS} [Validate]')
         
         with torch.no_grad():
-            batch_label_start_idx = 0 # Reset for each batch if target labels are batch-concatenated
             for imgs, labels_concat_val, target_lengths_val in val_pbar:
                 imgs = imgs.to(device)
-                labels_concat_val_dev = labels_concat_val.to(device) # For loss
-                target_lengths_val_dev = target_lengths_val.to(device) # For loss
+                labels_concat_val_dev = labels_concat_val.to(device)
+                target_lengths_val_dev = target_lengths_val.to(device)
 
-                # For validation, autocast is optional but can be used if precision matches training.
-                # Here, we'll run validation in full precision or matching the training context if needed.
-                # For simplicity and to avoid issues if not strictly necessary, often validation is done without autocast.
-                # If you use autocast here, ensure it's the same device_type.
-                # with autocast(device_type=device.type, enabled=(device.type == 'cuda')):
+                # For validation, autocast usage should match training if desired,
+                # or be omitted for full precision.
+                # Assuming validation without autocast here for simplicity unless specified.
                 preds = model(imgs)
                 preds_log_softmax = preds.log_softmax(2)
                 
@@ -149,18 +145,16 @@ def main():
 
                 _, max_indices_batch = preds.cpu().max(2)
                 
-                labels_concat_val_cpu = labels_concat_val.cpu() # Keep on CPU for Python iteration
+                labels_concat_val_cpu = labels_concat_val.cpu()
                 target_lengths_val_cpu = target_lengths_val.cpu()
 
-                batch_label_start_idx = 0 # Reset for each batch
+                batch_label_start_idx = 0
                 for i in range(imgs.size(0)):
                     pred_indices_sample = max_indices_batch[:, i].tolist()
-                    
                     pred_text = ''.join(
                         alphabet[c-1] for j, c in enumerate(pred_indices_sample)
                         if c != 0 and (j == 0 or c != pred_indices_sample[j-1])
                     )
-                    
                     current_target_len = target_lengths_val_cpu[i].item()
                     target_indices_sample = labels_concat_val_cpu[batch_label_start_idx : batch_label_start_idx + current_target_len].tolist()
                     tgt_text = ''.join(alphabet[idx - 1] for idx in target_indices_sample)
@@ -188,3 +182,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
