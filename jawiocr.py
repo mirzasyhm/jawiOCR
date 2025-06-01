@@ -30,7 +30,7 @@ if gpus_tf: print(f"TensorFlow Found GPUs: {gpus_tf}")
 else: print("TensorFlow: No GPU found.")
 
 
-# --- CRAFT Model Import and Utilities (Copied from your paste-2.txt) ---
+# --- CRAFT Model Import and Utilities ---
 try:
     from model.craft import CRAFT
 except ImportError as e:
@@ -211,59 +211,46 @@ def load_custom_orientation_model_keras(model_path):
         return None
 
 def preprocess_for_custom_orientation(image_bgr, target_img_size=(224, 224)):
-    """Prepares a BGR OpenCV image for the custom Keras orientation model."""
     if image_bgr is None: return None
-    # Convert BGR OpenCV to RGB PIL Image
     pil_image = PILImage.fromarray(cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB))
-    
-    # Resize using PIL
     pil_image_resized = pil_image.resize(target_img_size, PILImage.Resampling.LANCZOS)
-    
-    # Convert PIL to NumPy array
-    img_array = tf_keras_image.img_to_array(pil_image_resized) # tf_keras_image alias
-    
-    # Ensure 3 channels if model expects RGB (ResNet50 does)
-    if img_array.shape[-1] == 1: # Grayscale to RGB
+    img_array = tf_keras_image.img_to_array(pil_image_resized)
+    if img_array.shape[-1] == 1: 
         img_array = tf.image.grayscale_to_rgb(tf.convert_to_tensor(img_array)).numpy()
-    
     if img_array.shape[-1] != 3:
-        print(f"Error: Image array for orientation model needs 3 channels. Got {img_array.shape}")
-        return None
-
+        print(f"Error: Orient model needs 3 channels. Got {img_array.shape}"); return None
     img_array_batched = np.expand_dims(img_array, axis=0)
-    preprocessed_img_array = resnet50_preprocess_input(img_array_batched.copy()) # Specific to ResNet50
+    preprocessed_img_array = resnet50_preprocess_input(img_array_batched.copy())
     return preprocessed_img_array
 
 def get_custom_page_orientation(orientation_model, image_bgr, class_names, target_img_size=(224, 224)):
-    """Gets page orientation using the custom Keras model."""
     if orientation_model is None:
-        print("Orientation model not loaded. Assuming 0 degrees.")
-        return "0_degrees", 1.0 # Default to 0 degrees with high confidence
-
+        print("Keras Orientation model not loaded. Assuming 0_degrees.")
+        return "0_degrees", 1.0 
     preprocessed_image = preprocess_for_custom_orientation(image_bgr, target_img_size)
     if preprocessed_image is None:
-        print("Preprocessing for orientation model failed. Assuming 0 degrees.")
+        print("Preprocessing for Keras orientation model failed. Assuming 0_degrees.")
         return "0_degrees", 1.0
-
     predictions = orientation_model.predict(preprocessed_image)
     predicted_index = np.argmax(predictions[0])
-    confidence = np.max(predictions[0]) # Raw confidence, not percentage here
-
+    confidence = np.max(predictions[0]) 
     try:
         predicted_class_name = class_names[predicted_index]
-        print(f"Custom orientation model predicted: {predicted_class_name} with confidence: {confidence:.4f}")
-        return predicted_class_name, confidence
+        # Output for global orientation is printed in main_ocr_pipeline now
+        return predicted_class_name, confidence 
     except IndexError:
-        print(f"Error: Predicted index {predicted_index} out of range for CLASS_NAMES. Assuming 0_degrees.")
+        print(f"Error: Predicted index {predicted_index} out of range. Assuming 0_degrees.")
         return "0_degrees", 0.0
 
-
 # --- Simple Per-Crop Orientation Correction ---
-def simple_orientation_correction(image_crop_bgr: np.ndarray) -> np.ndarray:
-    if image_crop_bgr is None or image_crop_bgr.shape[0]==0 or image_crop_bgr.shape[1]==0: return image_crop_bgr
+def simple_orientation_correction(image_crop_bgr: np.ndarray) -> tuple[np.ndarray, str]: # Returns image and action string
+    if image_crop_bgr is None or image_crop_bgr.shape[0]==0 or image_crop_bgr.shape[1]==0: 
+        return image_crop_bgr, "no_action_invalid_crop"
     h,w = image_crop_bgr.shape[:2]
-    if w < h: return cv2.rotate(image_crop_bgr, cv2.ROTATE_90_CLOCKWISE)
-    else: return image_crop_bgr
+    if w < h: 
+        return cv2.rotate(image_crop_bgr, cv2.ROTATE_90_CLOCKWISE), "rotated_90_cw_simple"
+    else: 
+        return image_crop_bgr, "no_rotation_simple"
 
 # --- Cropping Utility ---
 def get_cropped_image_from_poly(image_bgr, poly_pts):
@@ -291,19 +278,16 @@ def get_cropped_image_from_poly(image_bgr, poly_pts):
     if warped_crop.shape[0]==0 or warped_crop.shape[1]==0: return None
     return warped_crop
 
-
 # --- Function to run one full OCR pass (CRAFT + Sort + Parseq) ---
-def run_ocr_pass(image_bgr_input_for_pass, base_image_filename_for_pass, pass_name, args, craft_net, parseq_model, parseq_img_transform, device, debug_output_dir):
-    print(f"\n--- Starting OCR Pass: {pass_name} ---")
+def run_ocr_pass(image_bgr_input_for_pass, base_image_filename_for_pass, pass_name, args, craft_net, parseq_model, parseq_img_transform, device, debug_output_dir, global_orientation_applied_deg=0):
+    print(f"\n--- Starting OCR Pass: {pass_name} (Input page globally rotated by {global_orientation_applied_deg} deg CW if applicable) ---")
     
-    # CRAFT Detection
     detected_polys = perform_craft_inference(
         craft_net, image_bgr_input_for_pass, args.text_threshold, args.link_threshold,
         args.low_text, (device.type=='cuda'), args.poly, args.canvas_size, args.mag_ratio
     )
     print(f"{pass_name} - CRAFT detected {len(detected_polys)} regions.")
 
-    # R-L Sort
     regions_with_x_coords = []
     if detected_polys:
         for poly_pts in detected_polys:
@@ -313,9 +297,7 @@ def run_ocr_pass(image_bgr_input_for_pass, base_image_filename_for_pass, pass_na
                 regions_with_x_coords.append((center_x, poly_pts))
         regions_with_x_coords.sort(key=lambda item: item[0], reverse=True)
         sorted_polys = [item[1] for item in regions_with_x_coords]
-    else:
-        sorted_polys = []
-    
+    else: sorted_polys = []
     print(f"{pass_name} - Regions sorted R-L: {len(sorted_polys)} regions.")
 
     pass_results_data = []
@@ -332,11 +314,11 @@ def run_ocr_pass(image_bgr_input_for_pass, base_image_filename_for_pass, pass_na
             except Exception as e: print(f"Err save crop {crop_fn}: {e}")
         
         crop_for_parseq = cropped_bgr
+        simple_orientation_action = "not_applied"
         if args.use_simple_orientation:
-            corrected_crop = simple_orientation_correction(cropped_bgr)
-            crop_for_parseq = corrected_crop
-            if args.save_debug_crops and corrected_crop is not cropped_bgr:
-                corrected_fn = f"{base_image_filename_for_pass}_pass_{pass_name}_sregion_{i+1}_corrected.png"
+            crop_for_parseq, simple_orientation_action = simple_orientation_correction(cropped_bgr) # Get action
+            if args.save_debug_crops and crop_for_parseq is not cropped_bgr: # Check if changed
+                corrected_fn = f"{base_image_filename_for_pass}_pass_{pass_name}_sregion_{i+1}_corrected_{simple_orientation_action}.png"
                 try: cv2.imwrite(os.path.join(debug_output_dir, corrected_fn), crop_for_parseq)
                 except Exception as e: print(f"Err save corrected {corrected_fn}: {e}")
 
@@ -356,8 +338,8 @@ def run_ocr_pass(image_bgr_input_for_pass, base_image_filename_for_pass, pass_na
                 
                 x_key = regions_with_x_coords[i][0] if i < len(regions_with_x_coords) else "N/A"
                 conf_s = f"{seq_conf:.4f}" if seq_conf is not None else "N/A"
-                print(f"{pass_name} SRegion {i+1}(X:{x_key}):Txt='{text_seg}',Conf={conf_s}")
-                pass_results_data.append({'orig_x':x_key,'poly':poly_pts,'text':text_seg,'conf':seq_conf})
+                print(f"{pass_name} SRegion {i+1}(X:{x_key}, SimpleOrient:{simple_orientation_action}):Txt='{text_seg}',Conf={conf_s}") # Added simple_orientation_action
+                pass_results_data.append({'orig_x':x_key,'poly':poly_pts,'text':text_seg,'conf':seq_conf, 'simple_orientation': simple_orientation_action}) # Store action
                 pass_text_snippets.append(text_seg)
             else: print(f"{pass_name} - No text decoded for sorted region {i+1}")
             
@@ -366,12 +348,10 @@ def run_ocr_pass(image_bgr_input_for_pass, base_image_filename_for_pass, pass_na
     print(f"{pass_name} - Avg Confidence: {avg_confidence:.4f}, Combined Text: {final_text}")
     return final_text, avg_confidence, pass_results_data
 
-
 # --- Main OCR Pipeline ---
 def main_ocr_pipeline(args):
     cuda_enabled = not args.no_cuda and torch.cuda.is_available()
-    pytorch_device = torch.device('cuda' if cuda_enabled else 'cpu') # For PyTorch models
-    # TensorFlow will find its own device based on system config / tf.config
+    pytorch_device = torch.device('cuda' if cuda_enabled else 'cpu')
     print(f"Using PyTorch device: {pytorch_device}")
 
     debug_output_dir = ""
@@ -380,49 +360,42 @@ def main_ocr_pipeline(args):
         if not os.path.exists(debug_output_dir): os.makedirs(debug_output_dir)
         print(f"Created debug crops directory: {debug_output_dir}")
 
-    # Load Custom Keras Orientation Model
     orientation_model_keras = None
     if args.custom_orientation_model_path:
         orientation_model_keras = load_custom_orientation_model_keras(args.custom_orientation_model_path)
-        if orientation_model_keras is None:
-            print("Proceeding without custom page orientation model due to loading error.")
+        if orientation_model_keras is None: print("Proceeding without custom page orientation.")
 
     print(f"Processing image: {args.image_path}")
     image_bgr_original = cv2.imread(args.image_path)
     if image_bgr_original is None: print(f"Error: Could not read image {args.image_path}"); return
     base_image_filename = os.path.splitext(os.path.basename(args.image_path))[0]
     
-    # Initial Global Page Orientation using Custom Keras Model
     image_for_pass1 = image_bgr_original.copy()
-    initial_rotation_applied = 0 # Degrees CW
+    initial_rotation_applied_deg = 0 
+    global_orientation_prediction_str = "N/A (Keras model not used or failed)"
     
     if orientation_model_keras:
-        # CLASS_NAMES must match your Keras model's training order
-        # From your demo: ['0_degrees', '180_degrees', '270_degrees', '90_degrees']
         keras_class_names = args.orientation_class_names.split(',')
-        
         pred_orient_class, pred_orient_conf = get_custom_page_orientation(
-            orientation_model_keras, image_bgr_original, 
-            keras_class_names, 
+            orientation_model_keras, image_bgr_original, keras_class_names, 
             target_img_size=(args.orientation_img_size, args.orientation_img_size)
         )
-        
+        global_orientation_prediction_str = f"{pred_orient_class} (Conf: {pred_orient_conf:.2f})" # Store for logging
+        print(f"Global Page Orientation Prediction by Keras Model: {global_orientation_prediction_str}")
+
         if pred_orient_class == "90_degrees" and pred_orient_conf * 100 >= args.orientation_confidence_threshold:
-            print("Global Orientation: Rotating page 90 degrees CCW (to correct 90 deg CW state).")
-            image_for_pass1 = rotate_image_cv(image_bgr_original, 270) # 270 CW is 90 CCW
-            initial_rotation_applied = 270
+            image_for_pass1 = rotate_image_cv(image_bgr_original, 270) 
+            initial_rotation_applied_deg = 270
         elif pred_orient_class == "270_degrees" and pred_orient_conf * 100 >= args.orientation_confidence_threshold:
-            print("Global Orientation: Rotating page 90 degrees CW (to correct 270 deg CW state).")
             image_for_pass1 = rotate_image_cv(image_bgr_original, 90)
-            initial_rotation_applied = 90
-        # 0 and 180 degree predictions from custom model leave page as is for Pass 1, 
-        # 180 deg is handled by the conditional second OCR pass.
+            initial_rotation_applied_deg = 90
         
-        if args.save_debug_crops and initial_rotation_applied != 0:
-            fn = f"{base_image_filename}_page_custom_oriented_{initial_rotation_applied}deg.png"
+        if args.save_debug_crops and initial_rotation_applied_deg != 0:
+            fn = f"{base_image_filename}_page_custom_oriented_{initial_rotation_applied_deg}deg.png"
             cv2.imwrite(os.path.join(debug_output_dir, fn), image_for_pass1)
+    else:
+        print("Custom Keras orientation model not used for global page orientation.")
     
-    # Load PyTorch models (CRAFT, Parseq)
     craft_net = CRAFT()
     print(f'Loading CRAFT w: {args.craft_model_path}')
     ckpt_craft = torch.load(args.craft_model_path,map_location=pytorch_device,weights_only=False)
@@ -434,10 +407,10 @@ def main_ocr_pipeline(args):
 
     parseq_model,parseq_img_transform = load_parseq_model_strhub(args.parseq_model_path,pytorch_device)
 
-    # --- OCR Pass 1 ---
     final_text_pass1, avg_conf_pass1, results_data_pass1 = run_ocr_pass(
         image_for_pass1, base_image_filename, "Pass1", args, 
-        craft_net, parseq_model, parseq_img_transform, pytorch_device, debug_output_dir
+        craft_net, parseq_model, parseq_img_transform, pytorch_device, debug_output_dir,
+        global_orientation_applied_deg=initial_rotation_applied_deg # Pass this info
     )
     
     chosen_final_text = final_text_pass1
@@ -445,12 +418,8 @@ def main_ocr_pipeline(args):
     chosen_pass_name = "Pass1"
     image_for_visualization = image_for_pass1.copy()
 
-
-    # --- Conditional OCR Pass 2 (180-degree rotation) ---
-    if avg_conf_pass1 * 100 < args.rerun_180_threshold: # Confidence is 0-1, threshold 0-100
-        print(f"\nPass 1 confidence ({avg_conf_pass1*100:.2f}%) is below threshold ({args.rerun_180_threshold}%).")
-        print("Performing OCR Pass 2 with 180-degree rotation of Pass 1 input image.")
-        
+    if avg_conf_pass1 * 100 < args.rerun_180_threshold:
+        print(f"\nPass 1 conf ({avg_conf_pass1*100:.2f}%) < threshold ({args.rerun_180_threshold}%). Re-running with 180-deg rotation.")
         image_for_pass2 = rotate_image_cv(image_for_pass1, 180)
         if args.save_debug_crops:
             fn = f"{base_image_filename}_page_for_pass2_180rot.png"
@@ -458,103 +427,87 @@ def main_ocr_pipeline(args):
 
         final_text_pass2, avg_conf_pass2, results_data_pass2 = run_ocr_pass(
             image_for_pass2, base_image_filename, "Pass2_180_Rot", args,
-            craft_net, parseq_model, parseq_img_transform, pytorch_device, debug_output_dir
+            craft_net, parseq_model, parseq_img_transform, pytorch_device, debug_output_dir,
+            global_orientation_applied_deg=(initial_rotation_applied_deg + 180) % 360 # Track total rotation for this pass
         )
         
         if avg_conf_pass2 > avg_conf_pass1:
-            print("Pass 2 (180-deg rotated) yielded higher confidence. Using Pass 2 results.")
+            print("Pass 2 (180-deg rotated) > Pass 1. Using Pass 2 results.")
             chosen_final_text = final_text_pass2
             chosen_results_data = results_data_pass2
             chosen_pass_name = "Pass2_180_Rot"
-            image_for_visualization = image_for_pass2.copy() # Visualize on the image that gave best results
+            image_for_visualization = image_for_pass2.copy()
         else:
-            print("Pass 1 yielded higher or equal confidence. Sticking with Pass 1 results.")
+            print("Pass 1 >= Pass 2. Sticking with Pass 1 results.")
     else:
-        print(f"\nPass 1 confidence ({avg_conf_pass1*100:.2f}%) is sufficient. Skipping 180-degree re-run.")
+        print(f"\nPass 1 conf ({avg_conf_pass1*100:.2f}%) sufficient. Skipping 180-deg re-run.")
 
     print(f"\n--- Final Chosen Result (from {chosen_pass_name}) ---")
+    print(f"Initial Global Page Orientation by Keras Model: {global_orientation_prediction_str}")
+    print(f"Global Page Rotation Applied for Chosen Pass: {initial_rotation_applied_deg if chosen_pass_name == 'Pass1' else (initial_rotation_applied_deg + 180)%360} deg CW")
     print(f"Final Combined Right-to-Left Text: {chosen_final_text}\n")
 
-    # Save final results
     if args.output_dir:
         if not os.path.exists(args.output_dir): os.makedirs(args.output_dir)
-        
-        # Re-draw polygons on the chosen visualization image
         final_output_image_viz = image_for_visualization.copy()
-        for res_item_viz in chosen_results_data: # Use a different loop variable for clarity
-            # Check if 'polygon' key exists AND its value is not None
+        for res_item_viz in chosen_results_data:
             if 'polygon' in res_item_viz and res_item_viz['polygon'] is not None:
                  try:
-                     # Ensure poly_pts is a NumPy array for astype
                      poly_to_draw = np.array(res_item_viz['polygon'], dtype=np.float32)
                      cv2.polylines(final_output_image_viz, [poly_to_draw.astype(np.int32)], True, (0,0,255), 2)
-                 except Exception as e_draw:
-                     print(f"Warning: Could not draw polygon for a result item due to error: {e_draw}")
+                 except Exception as e_draw: print(f"Warn: Could not draw polygon: {e_draw}")
 
         viz_filepath = os.path.join(args.output_dir,f"res_ocr_{base_image_filename}_final.jpg")
         cv2.imwrite(viz_filepath, final_output_image_viz)
-        print(f"Final visualized OCR saved to: {viz_filepath}")
+        print(f"Final viz saved to: {viz_filepath}")
         
         txt_filepath = os.path.join(args.output_dir,f"res_ocr_{base_image_filename}_final.txt")
         with open(txt_filepath,'w',encoding='utf-8') as f:
             f.write(f"Final Chosen Pass: {chosen_pass_name}\n")
+            f.write(f"Initial Global Page Orientation by Keras Model: {global_orientation_prediction_str}\n")
+            f.write(f"Global Page Rotation Applied for Chosen Pass Input: {initial_rotation_applied_deg if chosen_pass_name == 'Pass1' else (initial_rotation_applied_deg + 180)%360} deg CW\n")
             f.write(f"Final Combined Text (R-L): {chosen_final_text}\n\n")
             f.write(f"Individual Region Detections (from chosen pass, sorted R-L):\n")
-            for res_item_txt in chosen_results_data: # Use a different loop variable
-                poly_str = "N/A_Polygon" # Default if polygon is missing or None
-                # Check if 'polygon' key exists AND its value is not None
-                if 'polygon' in res_item_txt and res_item_txt['polygon'] is not None:
+            f.write(f"X-Key|SimpleOrient|Polygon|Text|Confidence\n") # Header for clarity
+            for res in chosen_results_data:
+                poly_s = "N/A_Poly"
+                if 'polygon' in res and res['polygon'] is not None:
                     try: 
-                        # Ensure it's a NumPy array before attempting to iterate for string formatting
-                        current_poly = np.array(res_item_txt['polygon'], dtype=np.float32)
-                        if current_poly.ndim == 2 and current_poly.shape[1] == 2: # Expected shape (N, 2)
-                             poly_str = ";".join([f"{int(p[0])},{int(p[1])}" for p in current_poly])
-                        else:
-                            poly_str = "Malformed_Polygon_Data"
-                    except Exception as e_poly_str: # Catch broader errors during formatting
-                        print(f"Warning: Error formatting polygon to string: {e_poly_str}")
-                        poly_str = "Error_Parsing_Polygon"
+                        current_poly = np.array(res['polygon'], dtype=np.float32)
+                        if current_poly.ndim == 2 and current_poly.shape[1] == 2:
+                             poly_s = ";".join([f"{int(p[0])},{int(p[1])}" for p in current_poly])
+                        else: poly_s = "Malformed_Poly"
+                    except Exception: poly_s = "Err_Parse_Poly"
                 
-                conf_s = f"{res_item_txt['conf']:.4f}" if 'conf' in res_item_txt and res_item_txt['conf'] is not None else "N/A"
-                text_s = res_item_txt.get('text', "N/A_Text") # Use .get for safety
-                x_key_s = res_item_txt.get('orig_x', "N/A_X") # Use .get for safety
-
-                f.write(f"X-Key:{x_key_s}|Poly:[{poly_str}]|Txt:{text_s}|Conf:{conf_s}\n")
+                conf_s = f"{res['conf']:.4f}" if 'conf' in res and res['conf'] is not None else "N/A"
+                text_s = res.get('text', "N/A_Text")
+                x_key_s = res.get('orig_x', "N/A_X")
+                simple_o_s = res.get('simple_orientation', "N/A") # Get simple orientation action
+                f.write(f"{x_key_s}|{simple_o_s}|[{poly_s}]|{text_s}|{conf_s}\n")
         print(f"Final text results saved to: {txt_filepath}")
     print("OCR pipeline finished.")
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Jawi OCR: Custom Global Orient + CRAFT + Simple Per-Crop Orient + Parseq + R-L Sort + Conditional 180 Re-run')
-    # Paths
     parser.add_argument('--image_path', required=True, type=str)
     parser.add_argument('--craft_model_path', required=True, type=str)
     parser.add_argument('--parseq_model_path', required=True, type=str)
-    parser.add_argument('--custom_orientation_model_path', type=str, default=None, help='Path to Keras (.keras) custom page orientation model')
+    parser.add_argument('--custom_orientation_model_path', type=str, default=None)
     parser.add_argument('--output_dir', default='./jawi_ocr_results/', type=str)
-    
-    # Custom Orientation Model Params
-    parser.add_argument('--orientation_class_names', type=str, default='0_degrees,180_degrees,270_degrees,90_degrees', help='Comma-separated class names for orientation model, in order of model output indices.')
-    parser.add_argument('--orientation_img_size', type=int, default=224, help='Input image size (square) for custom orientation model.')
-    parser.add_argument('--orientation_confidence_threshold', type=float, default=75.0, help='Confidence threshold (0-100) for applying 90/270 global rotation.')
-
-    # CRAFT Params
+    parser.add_argument('--orientation_class_names', type=str, default='0_degrees,180_degrees,270_degrees,90_degrees')
+    parser.add_argument('--orientation_img_size', type=int, default=224)
+    parser.add_argument('--orientation_confidence_threshold', type=float, default=75.0)
     parser.add_argument('--text_threshold', default=0.7,type=float)
     parser.add_argument('--low_text', default=0.4,type=float)
     parser.add_argument('--link_threshold', default=0.4,type=float)
     parser.add_argument('--canvas_size', default=1280,type=int)
     parser.add_argument('--mag_ratio', default=1.5,type=float)
     parser.add_argument('--poly',default=False,action='store_true')
-    
-    # Per-Crop Simple Orientation
-    parser.add_argument('--use_simple_orientation', action='store_true', help='Enable W<H per-crop 90deg correction')
-
-    # Conditional 180-degree Re-run
-    parser.add_argument('--rerun_180_threshold', type=float, default=90.0, help='Avg Parseq confidence (0-100) below which a 180-deg re-run is triggered.')
-
-    # General
+    parser.add_argument('--use_simple_orientation', action='store_true')
+    parser.add_argument('--rerun_180_threshold', type=float, default=90.0)
     parser.add_argument('--save_debug_crops', action='store_true')
-    parser.add_argument('--no_cuda', action='store_true', help='Disable CUDA for PyTorch models')
+    parser.add_argument('--no_cuda', action='store_true')
     
     args = parser.parse_args()
     main_ocr_pipeline(args)
