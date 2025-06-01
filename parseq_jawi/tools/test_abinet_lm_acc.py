@@ -14,7 +14,7 @@ from strhub.data.module import SceneTextDataModule
 from strhub.models.abinet.system import ABINet
 
 sys.path.insert(0, '.')
-from test import Result, print_results_table
+from test_parseq import Result, print_results_table
 
 from hubconf import _get_config
 
