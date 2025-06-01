@@ -675,7 +675,7 @@ def run_e2e_test_session(test_args):
                 f.write("--- JawiOCR E2E CRNN Test Summary ---\n") # Title changed
                 f.write(f"Dataset Directory: {test_args.dataset_dir}\nTotal Images: {len(all_ground_truths)}\n")
                 if skipped_images_count > 0: f.write(f"Skipped: {skipped_images_count}\n")
-                f.write(f"Sentence Acc: {sentence_accuracy:.2f}%\nWER: {wer:.2f}%\nCER: {cer_val:.2f}%\nWord Acc: {word_recognition_accuracy:.2f}%\n")
+                f.write(f"Sentence Acc: {sentence_accuracy:.2f}%\nWER: {wer:.2f}%\nCER: {cer:.2f}%\nWord Acc: {word_recognition_accuracy:.2f}%\n")
             print(f"Summary saved to: {summary_path}")
         except Exception as e: print(f"Error saving summary TXT: {e}")
 
