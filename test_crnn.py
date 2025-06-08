@@ -11,6 +11,7 @@ from tqdm import tqdm
 import json # For loading alphabet
 
 import torch
+import torchaudio
 import torch.backends.cudnn as cudnn
 from collections import OrderedDict
 from PIL import Image as PILImage
