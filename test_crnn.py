@@ -772,7 +772,8 @@ if __name__ == '__main__':
     test_parser.add_argument('--use_simple_orientation', action='store_true')
     # MODIFIED: Rerun threshold changed for CRNN context
     test_parser.add_argument('--beam_size', type=int, default=20, help="Beam size for CTC Beam Search Decoder.")
-    test_parser.add_argument('--rerun_180_confidence_threshold', type=float, default=75.0, help="If Pass1 average confidence is below this, trigger 180-deg re-run.")    test_parser.add_argument('--save_debug_crops', action='store_true')
+    test_parser.add_argument('--rerun_180_confidence_threshold', type=float, default=75.0, help="If Pass1 average confidence is below this, trigger 180-deg re-run.")
+    test_parser.add_argument('--save_debug_crops', action='store_true')
     test_parser.add_argument('--no_cuda', action='store_true')
     
     parsed_test_args = test_parser.parse_args()
