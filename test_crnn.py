@@ -280,49 +280,6 @@ def preprocess_for_crnn_local(img_crop_bgr, crnn_transform, device):
     img_tensor = crnn_transform(img_crop_bgr).unsqueeze(0) # Add batch dimension
     return img_tensor.to(device)
 
-# --- Add this new function to your script ---
-def decode_with_beam_search(log_probs, beam_search_decoder, alphabet_chars):
-    """
-    Decodes CRNN output using torchaudio's CTCBeamSearch decoder.
-
-    Args:
-        log_probs (Tensor): Log-softmax probabilities from the model.
-                            Shape: (Batch, Time, N_Classes) -> (1, T, C) for us.
-        beam_search_decoder: The initialized torchaudio ctc_decoder object.
-        alphabet_chars (list): List of characters (without blank) for mapping.
-
-    Returns:
-        tuple: (best_hypothesis_text, confidence_score)
-               Returns ("", 0.0) if no valid hypothesis is found.
-    """
-    # The decoder expects log_probs tensor
-    hypotheses = beam_search_decoder(log_probs)
-
-    # For a batch size of 1 and nbest=1, the output is List[List[CTCHypothesis]]
-    if not hypotheses or not hypotheses[0]:
-        return "", 0.0
-
-    best_hypothesis = hypotheses[0][0] # Get the top hypothesis for the first batch item
-
-    # The score is a log-probability, so we convert it to a probability with exp()
-    confidence_score = torch.exp(best_hypothesis.score).item()
-
-    # The tokens are returned as indices. We need to convert them to characters.
-    # The decoder handles the CTC logic (merging repeats, removing blanks).
-    # We join the resulting character tokens to form the final string.
-    # Note: `best_hypothesis.tokens` gives indices, `beam_search_decoder.idxs_to_tokens` can convert them.
-    # Let's manually map for clarity and to ensure it matches our alphabet.
-    # The decoder should already have the alphabet, so `idxs_to_tokens` is cleaner.
-    
-    # Get the list of character tokens for the best hypothesis
-    char_tokens = beam_search_decoder.idxs_to_tokens(best_hypothesis.tokens)
-    
-    # Join them to form the final text string
-    best_hypothesis_text = "".join(char_tokens)
-
-    return best_hypothesis_text, confidence_score
-
-
 
 # --- Image Rotation, Custom Orientation, Cropping Utilities ---
 # (Copied from paste.txt [1] - These parts remain the same)
@@ -396,9 +353,8 @@ def get_cropped_image_from_poly(image_bgr, poly_pts): # From paste.txt
     return warped_crop if warped_crop.size else None
 
 # --- OCR Pass Function (Modified for CRNN) ---
-def run_ocr_pass(image_bgr_input_for_pass, base_image_filename_for_pass, pass_name, ocr_config,
-                 craft_net, crnn_model, crnn_img_transform, crnn_alphabet_chars, beam_search_decoder, # Added decoder
-                 device, debug_output_dir, global_orientation_applied_deg=0):
+def run_ocr_pass(image_bgr_input_for_pass, base_image_filename_for_pass, pass_name, ocr_engine, # Pass the whole engine
+                 debug_output_dir, global_orientation_applied_deg=0):
     
     detected_polys = perform_craft_inference(
         craft_net, image_bgr_input_for_pass, ocr_config.text_threshold, ocr_config.link_threshold,
@@ -446,17 +402,12 @@ def run_ocr_pass(image_bgr_input_for_pass, base_image_filename_for_pass, pass_na
             continue
         
         with torch.no_grad():
-            raw_preds = crnn_model(crnn_input_tensor)
-            # The beam search decoder expects log-softmax probabilities
+            raw_preds = ocr_engine.crnn_model(crnn_input_tensor) # Use engine's model
             preds_log_softmax = raw_preds.log_softmax(2)
 
             # --- MODIFIED DECODING STEP ---
             # Use the new beam search decoder instead of the old greedy one
-            text_segment, confidence = decode_with_beam_search(
-                preds_log_softmax,
-                beam_search_decoder,
-                crnn_alphabet_chars
-            )
+            text_segment, confidence = ocr_engine._decode_crnn_output_with_beam_search(preds_log_softmax)
             
             if text_segment:
                 pass_text_snippets.append(text_segment)
@@ -486,7 +437,6 @@ class JawiOCREngine:
         self.craft_net = self._load_craft_model()
         self.crnn_model, self.crnn_img_transform, self.crnn_alphabet_chars = self._load_crnn_model() # Modified
         self.orientation_model_keras = self._load_orientation_model()
-        self.beam_search_decoder = self._load_decoder()
 
     def _load_craft_model(self): # Remains same as paste.txt
         craft_net = CRAFT()
@@ -513,37 +463,76 @@ class JawiOCREngine:
         # print("CRNN model loaded successfully.") # Already printed in load_crnn_model_local
         return model, transform, alphabet
     
-    def _load_decoder(self):
-        """Initializes the torchaudio CTC beam search decoder."""
-        print("Initializing CTC Beam Search Decoder...")
-        
-        # The decoder's token set must include the CTC blank token.
-        # By convention, the blank is often at index 0 and represented by a symbol like '-'.
-        # Our CRNN alphabet from json does not include it, so we add it here.
-        # The torchaudio decoder needs the full list of symbols.
-        
-        # Define the blank token symbol
-        blank_token = "-"
-        
-        # Create the token list for the decoder
-        decoder_tokens = [blank_token] + self.crnn_alphabet_chars
-        
+    def _decode_crnn_output_with_beam_search(self, log_probs_tensor):
+        """
+        Decodes CRNN log-probabilities using the best available CTC beam search method.
+        Tries the modern torchaudio.models.decoder API first, and falls back to the
+        older torchaudio.functional.ctc_decode API if necessary.
+
+        Args:
+            log_probs_tensor (Tensor): Log-softmax probabilities from the model.
+                                    Shape: (Time, Batch, N_Classes) -> (T, 1, C)
+
+        Returns:
+            tuple: (best_hypothesis_text, confidence_score)
+        """
+        # The tensor needs to be in shape (Batch, Time, N_Classes) for modern decoders
+        # and (Time, Batch, N_Classes) for the functional one. We'll prep both.
+        log_probs_for_modern = log_probs_tensor.permute(1, 0, 2) # (1, T, C)
+        log_probs_for_legacy = log_probs_tensor # (T, 1, C)
+
         try:
-            # For lexicon-free decoding, we only need tokens and the blank token definition.
-            # We set a beam size, which can be tuned. 20 is a reasonable start.
-            beam_search_decoder = torchaudio.models.decoder.ctc_decoder(
+            # --- MODERN API (torchaudio >= 2.1) ---
+            if not hasattr(self, 'beam_search_decoder'):
+                # Initialize the modern decoder on the first call
+                print("INFO: Initializing modern torchaudio CTC Beam Search Decoder...")
+                from torchaudio.models.decoder import ctc_decoder
+                blank_token = "-"
+                decoder_tokens = [blank_token] + self.crnn_alphabet_chars
+                self.beam_search_decoder = ctc_decoder(
+                    tokens=decoder_tokens,
+                    beam_size=self.config.beam_size,
+                    blank_token=blank_token,
+                    nbest=1,
+                    log_add=True
+                )
+
+            hypotheses = self.beam_search_decoder(log_probs_for_modern)
+            if not hypotheses or not hypotheses[0]:
+                return "", 0.0
+
+            best_hypothesis = hypotheses[0][0]
+            confidence = torch.exp(best_hypothesis.score).item()
+            text = "".join(self.beam_search_decoder.idxs_to_tokens(best_hypothesis.tokens))
+            return text, confidence
+
+        except (ImportError, AttributeError):
+            # --- FALLBACK TO LEGACY API (older torchaudio) ---
+            if not hasattr(self, 'using_legacy_decoder'):
+                print("INFO: Modern decoder not found. Falling back to legacy 'torchaudio.functional.ctc_decode'.")
+                self.using_legacy_decoder = True
+            
+            from torchaudio.functional import ctc_decode
+            
+            # We need to define the character list for the legacy decoder here
+            blank_id = 0 # Legacy decoder assumes blank is at index 0
+            decoder_tokens = self.crnn_alphabet_chars # No blank in this list
+
+            beam_search_result = ctc_decode(
+                log_probs=log_probs_for_legacy,
                 tokens=decoder_tokens,
-                beam_size=self.config.beam_size, # Add beam_size to config
-                blank_token=blank_token,
-                nbest=1, # We only need the single best hypothesis
-                log_add=True, # Use log-domain addition for numerical stability
+                beam_size=self.config.beam_size,
+                blank=blank_id
             )
-            print("CTC Beam Search Decoder initialized successfully.")
-            return beam_search_decoder
-        except Exception as e:
-            print(f"CRITICAL Error initializing torchaudio CTC decoder: {e}")
-            print("Please ensure 'torchaudio' is installed correctly and compatible with your PyTorch version.")
-            sys.exit(1)
+
+            if not beam_search_result or not beam_search_result[0]:
+                return "", 0.0
+
+            best_hypothesis = beam_search_result[0][0]
+            # The score from functional ctc_decode is also a log-probability
+            confidence = torch.exp(best_hypothesis.score).item()
+            text = "".join(best_hypothesis.tokens)
+            return text, confidence
         
     def _load_orientation_model(self): # Remains same as paste.txt
         if hasattr(self.config, 'custom_orientation_model_path') and self.config.custom_orientation_model_path:
@@ -586,10 +575,8 @@ class JawiOCREngine:
                     except Exception as e: print(f"Err saving oriented page: {e}")
 
             final_text_pass1, metric_pass1, _ = run_ocr_pass(
-                image_for_pass1, base_image_filename, "Pass1", self.config,
-                self.craft_net, self.crnn_model, self.crnn_img_transform, self.crnn_alphabet_chars,
-                self.beam_search_decoder, 
-                self.pytorch_device, debug_output_dir_for_image,
+                image_for_pass1, base_image_filename, "Pass1", self, # Pass self
+                debug_output_dir_for_image,
                 global_orientation_applied_deg=initial_rotation_applied_deg
             )
     
@@ -609,10 +596,8 @@ class JawiOCREngine:
             # ... (save debug image if needed) ...
             
             final_text_pass2, metric_pass2, _ = run_ocr_pass(
-                image_for_pass2, base_image_filename, "Pass2_180_Rot", self.config,
-                self.craft_net, self.crnn_model, self.crnn_img_transform, self.crnn_alphabet_chars,
-                self.beam_search_decoder, # <-- PASS THE DECODER TO 2ND PASS
-                self.pytorch_device, debug_output_dir_for_image,
+                image_for_pass2, base_image_filename, "Pass2_180_Rot", self, # Pass self
+                debug_output_dir_for_image,
                 global_orientation_applied_deg=(initial_rotation_applied_deg + 180) % 360
             )
             
