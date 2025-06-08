@@ -463,6 +463,8 @@ class JawiOCREngine:
     
     # --- Replace this entire method in the JawiOCREngine class ---
 
+    # --- Replace this entire method in the JawiOCREngine class ---
+
     def _decode_crnn_output_with_beam_search(self, log_probs_tensor):
         """
         Decodes CRNN log-probabilities using the best available CTC beam search method.
@@ -476,21 +478,24 @@ class JawiOCREngine:
         Returns:
             tuple: (best_hypothesis_text, confidence_score)
         """
-        # The tensor needs to be in shape (Batch, Time, N_Classes) for modern decoders
-        # and (Time, Batch, N_Classes) for the functional one. We'll prep both.
-        log_probs_for_modern = log_probs_tensor.permute(1, 0, 2) # (1, T, C)
-        log_probs_for_legacy = log_probs_tensor # (T, 1, C)
+        log_probs_for_modern = log_probs_tensor.permute(1, 0, 2)
+        log_probs_for_legacy = log_probs_tensor
+
+        blank_token = "-"
+        # --- FIX: Ensure the loaded alphabet does not contain our blank token ---
+        alphabet_without_blank = [char for char in self.crnn_alphabet_chars if char != blank_token]
 
         try:
             # --- MODERN API (torchaudio >= 2.1) ---
             if not hasattr(self, 'beam_search_decoder'):
-                # Initialize the modern decoder on the first call
                 print("INFO: Initializing modern torchaudio CTC Beam Search Decoder...")
                 from torchaudio.models.decoder import ctc_decoder
-                blank_token = "-"
-                decoder_tokens = [blank_token] + self.crnn_alphabet_chars
+                
+                # Use the cleaned alphabet to construct the token list
+                decoder_tokens = [blank_token] + alphabet_without_blank
+                
                 self.beam_search_decoder = ctc_decoder(
-                    lexicon=None,  # <-- THE FIX: Explicitly set lexicon to None for lexicon-free decoding.
+                    lexicon=None,
                     tokens=decoder_tokens,
                     beam_size=self.config.beam_size,
                     blank_token=blank_token,
@@ -507,26 +512,22 @@ class JawiOCREngine:
             text = "".join(self.beam_search_decoder.idxs_to_tokens(best_hypothesis.tokens))
             return text, confidence
 
-        except (ImportError, AttributeError) as e:
-            # Check if the error is the one we expect (missing 'decoder') or the new 'lexicon' one
-            if 'lexicon' in str(e):
-                # This handles the case where the user has a new enough version to cause the lexicon error
-                # but our code hadn't been updated yet. We re-raise to avoid silent failure.
-                raise e
-                
+        except (ImportError, AttributeError, ValueError) as e:
+            # Catch ValueError too, as a fallback just in case
             # --- FALLBACK TO LEGACY API (older torchaudio) ---
             if not hasattr(self, 'using_legacy_decoder'):
-                print("INFO: Modern decoder not found. Falling back to legacy 'torchaudio.functional.ctc_decode'.")
+                print(f"INFO: Modern decoder failed ({type(e).__name__}). Falling back to legacy 'torchaudio.functional.ctc_decode'.")
                 self.using_legacy_decoder = True
             
             from torchaudio.functional import ctc_decode
             
-            blank_id = 0 
-            decoder_tokens = self.crnn_alphabet_chars
+            blank_id = 0
+            # The legacy decoder also expects a token list *without* the blank token
+            decoder_tokens_for_legacy = alphabet_without_blank
 
             beam_search_result = ctc_decode(
                 log_probs=log_probs_for_legacy,
-                tokens=decoder_tokens,
+                tokens=decoder_tokens_for_legacy,
                 beam_size=self.config.beam_size,
                 blank=blank_id
             )
@@ -538,6 +539,7 @@ class JawiOCREngine:
             confidence = torch.exp(best_hypothesis.score).item()
             text = "".join(best_hypothesis.tokens)
             return text, confidence
+
 
         
     def _load_orientation_model(self): # Remains same as paste.txt
