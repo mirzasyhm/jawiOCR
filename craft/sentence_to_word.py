@@ -278,23 +278,28 @@ def perform_inference(net, image_path, text_threshold, link_threshold, low_text,
     return boxes, polys, image
 
 # --- New Helper Function for Sorting ---
-def sort_boxes_left_to_right(polygons: List[np.ndarray]) -> List[np.ndarray]:
+def sort_boxes_right_to_left(polygons: List[np.ndarray]) -> List[np.ndarray]:
     """
-    Sorts a list of polygons from left to right.
-    It calculates the bounding box for each polygon and uses its top-left x-coordinate as the sorting key.
+    Sorts a list of polygons from right to left based on their horizontal position.
+    This is crucial for right-to-left (RTL) languages like Jawi or Arabic.
     
     Args:
-        polygons: A list of polygons, where each polygon is a list of points.
+        polygons: A list of polygons detected by the model.
 
     Returns:
-        A new list of polygons sorted from left to right.
+        A new list of polygons sorted from right to left.
     """
     if not polygons:
         return []
     
-    # Use the x-coordinate of the bounding box for sorting
-    # cv2.boundingRect returns (x, y, w, h)
-    return sorted(polygons, key=lambda poly: cv2.boundingRect(np.array(poly).astype(np.int32))[0])
+    # Sort by the bounding box's top-left x-coordinate in descending order (reverse=True)
+    # This places the rightmost box (largest x) at the beginning of the list.
+    return sorted(
+        polygons,
+        key=lambda poly: cv2.boundingRect(np.array(poly).astype(np.int32))[0],
+        reverse=True
+    )
+
 
 
 def load_labels(labels_path: str) -> dict:
@@ -389,7 +394,7 @@ def main(args):
             continue
 
         # --- Sort detected polygons from left to right ---
-        sorted_polys = sort_boxes_left_to_right(detected_polys)
+        sorted_polys = sort_boxes_right_to_left(detected_polys)
 
         # --- Split sentence into words ---
         words = split_into_words(text)
