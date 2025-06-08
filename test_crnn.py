@@ -353,13 +353,16 @@ def get_cropped_image_from_poly(image_bgr, poly_pts): # From paste.txt
     return warped_crop if warped_crop.size else None
 
 # --- OCR Pass Function (Modified for CRNN) ---
-def run_ocr_pass(image_bgr_input_for_pass, base_image_filename_for_pass, pass_name, ocr_engine, # Pass the whole engine
+
+def run_ocr_pass(image_bgr_input_for_pass, base_image_filename_for_pass, pass_name, ocr_engine,
                  debug_output_dir, global_orientation_applied_deg=0):
     
+    # Correctly access models, config, and device through the ocr_engine object
     detected_polys = perform_craft_inference(
-        craft_net, image_bgr_input_for_pass, ocr_config.text_threshold, ocr_config.link_threshold,
-        ocr_config.low_text, (device.type == 'cuda'), ocr_config.poly, 
-        ocr_config.canvas_size, ocr_config.mag_ratio
+        ocr_engine.craft_net, image_bgr_input_for_pass, ocr_engine.config.text_threshold, 
+        ocr_engine.config.link_threshold, ocr_engine.config.low_text, 
+        (ocr_engine.pytorch_device.type == 'cuda'), ocr_engine.config.poly, 
+        ocr_engine.config.canvas_size, ocr_engine.config.mag_ratio
     )
     
     regions_with_x_coords = []
@@ -370,11 +373,10 @@ def run_ocr_pass(image_bgr_input_for_pass, base_image_filename_for_pass, pass_na
                     moments = cv2.moments(poly_pts.astype(np.int32))
                     center_x = int(moments["m10"] / moments["m00"]) if moments["m00"] != 0 else int(np.mean(poly_pts[:, 0]))
                     regions_with_x_coords.append((center_x, poly_pts))
-                except (ZeroDivisionError, ValueError): # Catch potential errors in moment calculation
-                    center_x = int(np.mean(poly_pts[:, 0])) # Fallback
+                except (ZeroDivisionError, ValueError):
+                    center_x = int(np.mean(poly_pts[:, 0]))
                     regions_with_x_coords.append((center_x, poly_pts))
-        # Sort Right-to-Left for Jawi
-        regions_with_x_coords.sort(key=lambda item: item[0], reverse=True) 
+        regions_with_x_coords.sort(key=lambda item: item[0], reverse=True)
         sorted_polys = [item[1] for item in regions_with_x_coords]
     else:
         sorted_polys = []
@@ -387,41 +389,37 @@ def run_ocr_pass(image_bgr_input_for_pass, base_image_filename_for_pass, pass_na
         if cropped_bgr is None or cropped_bgr.shape[0] == 0 or cropped_bgr.shape[1] == 0:
             continue
 
-        if ocr_config.save_debug_crops and debug_output_dir:
+        if ocr_engine.config.save_debug_crops and debug_output_dir:
             crop_fn = f"{base_image_filename_for_pass}_pass_{pass_name}_sregion_{i+1}_crop.png"
             try: cv2.imwrite(os.path.join(debug_output_dir, crop_fn), cropped_bgr)
             except Exception as e: print(f"Err save crop {crop_fn}: {e}")
         
         crop_for_crnn = cropped_bgr
-        if ocr_config.use_simple_orientation:
+        if ocr_engine.config.use_simple_orientation:
             crop_for_crnn, _ = simple_orientation_correction(cropped_bgr)
-            # Optionally save corrected crop if different
         
-        crnn_input_tensor = preprocess_for_crnn_local(crop_for_crnn, crnn_img_transform, device)
+        # Correctly access transform and device via the ocr_engine object
+        crnn_input_tensor = preprocess_for_crnn_local(
+            crop_for_crnn, ocr_engine.crnn_img_transform, ocr_engine.pytorch_device
+        )
         if crnn_input_tensor is None:
             continue
         
         with torch.no_grad():
-            raw_preds = ocr_engine.crnn_model(crnn_input_tensor) # Use engine's model
+            raw_preds = ocr_engine.crnn_model(crnn_input_tensor)
             preds_log_softmax = raw_preds.log_softmax(2)
 
-            # --- MODIFIED DECODING STEP ---
-            # Use the new beam search decoder instead of the old greedy one
             text_segment, confidence = ocr_engine._decode_crnn_output_with_beam_search(preds_log_softmax)
             
             if text_segment:
                 pass_text_snippets.append(text_segment)
                 pass_confidences.append(confidence)
             
-    # For CRNN, "average confidence" per pass is harder to define meaningfully without per-char probs from CTC.
-    # We can use a simpler metric: ratio of recognized segments or just the final text.
-    # For now, let's use a placeholder confidence or just rely on text length.
     avg_pass_conf = np.mean(pass_confidences) if pass_confidences else 0.0
+    final_text = " ".join(pass_text_snippets)
     
-    final_text = " ".join(pass_text_snippets) # Join R-L sorted snippets
-    
-    # Return the text and the new, meaningful confidence score
     return final_text, avg_pass_conf, None
+
 
 # --- JawiOCREngine Class (Modified for CRNN) ---
 class JawiOCREngine:
@@ -540,9 +538,13 @@ class JawiOCREngine:
             else: print("Skipping Keras orientation model: TensorFlow not available.")
         return None
 
-    def predict(self, image_path): # Modified to use CRNN
+    # --- Replace the existing predict method in JawiOCREngine with this one ---
+
+    def predict(self, image_path):
         image_bgr_original = cv2.imread(image_path)
-        if image_bgr_original is None: return "" 
+        if image_bgr_original is None: 
+            print(f"Warning: Could not read image at {image_path}. Skipping.")
+            return ""
         
         base_image_filename = os.path.splitext(os.path.basename(image_path))[0]
         debug_output_dir_for_image = ""
@@ -555,15 +557,14 @@ class JawiOCREngine:
         initial_rotation_applied_deg = 0
         
         if self.orientation_model_keras and hasattr(self.config, 'orientation_class_names'):
-            # ... [Orientation logic from paste.txt, unchanged] ...
             keras_class_names = self.config.orientation_class_names.split(',')
             pred_orient_class, pred_orient_conf = get_custom_page_orientation(
                 self.orientation_model_keras, image_bgr_original, keras_class_names,
                 target_img_size=(self.config.orientation_img_size, self.config.orientation_img_size)
             )
             new_rotation_deg = 0
-            if pred_orient_class == "90_degrees": new_rotation_deg = 270 # Rotate CCW to make text horizontal
-            elif pred_orient_class == "270_degrees": new_rotation_deg = 90  # Rotate CW
+            if pred_orient_class == "90_degrees": new_rotation_deg = 270
+            elif pred_orient_class == "270_degrees": new_rotation_deg = 90
             elif pred_orient_class == "180_degrees": new_rotation_deg = 180
 
             if new_rotation_deg != 0 and pred_orient_conf * 100 >= self.config.orientation_confidence_threshold:
@@ -574,36 +575,36 @@ class JawiOCREngine:
                     try: cv2.imwrite(os.path.join(debug_output_dir_for_image, fn), image_for_pass1)
                     except Exception as e: print(f"Err saving oriented page: {e}")
 
-            final_text_pass1, metric_pass1, _ = run_ocr_pass(
-                image_for_pass1, base_image_filename, "Pass1", self.config,
-                self.craft_net, self.crnn_model, self.crnn_img_transform, # Pass self
-                self.pytorch_device, debug_output_dir_for_image,
-                global_orientation_applied_deg=initial_rotation_applied_deg
-            )
-    
+        # --- THIS IS THE CORRECTED FUNCTION CALL ---
+        final_text_pass1, metric_pass1, _ = run_ocr_pass(
+            image_for_pass1, 
+            base_image_filename, 
+            "Pass1", 
+            self, # Pass the entire engine instance
+            debug_output_dir_for_image,
+            global_orientation_applied_deg=initial_rotation_applied_deg
+        )
+
         chosen_final_text = final_text_pass1
         
-        # Confidence for rerun is now based on `metric_pass1` (e.g., ratio of recognized segments)
-        # The threshold needs to be adjusted accordingly (0.0 to 1.0 for ratio)
-        # Or, for simplicity, check if text_pass1 is very short or empty.
-        # Let's simplify: if pass1 text length is too short relative to detected boxes, or metric is low
         rerun_condition_met = False
         if metric_pass1 * 100 < self.config.rerun_180_confidence_threshold:
             print(f"INFO: Pass 1 confidence ({metric_pass1*100:.2f}%) is below threshold ({self.config.rerun_180_confidence_threshold}%). Rerunning with 180-degree rotation.")
             rerun_condition_met = True
-
+        
         if rerun_condition_met:
             image_for_pass2 = rotate_image_cv(image_for_pass1, 180)
-            # ... (save debug image if needed) ...
             
+            # --- THIS IS THE SECOND CORRECTED FUNCTION CALL ---
             final_text_pass2, metric_pass2, _ = run_ocr_pass(
-                image_for_pass2, base_image_filename, "Pass2_180_Rot", self.config,
-                self.craft_net, self.crnn_model, self.crnn_img_transform, 
-                self.pytorch_device, debug_output_dir_for_image,
+                image_for_pass2, 
+                base_image_filename, 
+                "Pass2_180_Rot", 
+                self, # Pass the entire engine instance
+                debug_output_dir_for_image,
                 global_orientation_applied_deg=(initial_rotation_applied_deg + 180) % 360
             )
             
-            # Choose the result with the higher confidence score
             if metric_pass2 > metric_pass1:
                 chosen_final_text = final_text_pass2
                 print(f"INFO: Pass 2 result chosen (Confidence: {metric_pass2*100:.2f}%)")
@@ -611,6 +612,7 @@ class JawiOCREngine:
                 print(f"INFO: Pass 1 result kept (Confidence: {metric_pass1*100:.2f}%)")
                 
         return chosen_final_text.strip()
+
 
 # --- Main E2E Test Session (Modified for CRNN) ---
 def run_e2e_test_session(test_args):
