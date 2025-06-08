@@ -327,27 +327,47 @@ def extract_word_region(image: np.ndarray, poly: np.ndarray, padding=5) -> np.nd
     return image[y_start:y_end, x_start:x_end]
 
 def main(args):
-    # --- Load labels and create output directories ---
+    # --- [Previous code for loading labels and creating directories remains the same] ---
     labels = load_labels(args.labels_path)
     os.makedirs(args.output_images_dir, exist_ok=True)
-    
-    # --- Prepare new labels file ---
     new_labels_path = os.path.join(args.output_dir, 'labels.csv')
     with open(new_labels_path, 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
         writer.writerow(['file', 'text'])
 
-    # --- Load CRAFT model (as in your demo.py) ---
-    # This assumes you have the CRAFT class and copyStateDict function available
-    net = CRAFT()
-    if torch.cuda.is_available():
-        net.load_state_dict(copyStateDict(torch.load(args.trained_model)))
-        net = net.cuda()
-    else:
-        net.load_state_dict(copyStateDict(torch.load(args.trained_model, map_location='cpu')))
-    net.eval()
+    # --- [START] Corrected Model Loading Section ---
+    print("Loading CRAFT model...")
+    
+    # 1. Define the device to be used (GPU or CPU)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # --- Process each image ---
+    # 2. Instantiate the model
+    net = CRAFT()
+
+    # 3. Load the entire checkpoint dictionary to the defined device.
+    #    The 'FutureWarning' suggests setting 'weights_only'. Since we trust this model file,
+    #    we can set it to False to maintain compatibility and suppress the warning.
+    #    However, the main fix is accessing the correct key.
+    try:
+        # Load the entire dictionary from the .pth file
+        checkpoint = torch.load(args.trained_model, map_location=device)
+        
+        # 4. Extract the model's state dictionary from the 'craft' key
+        #    This is the crucial step to resolve the key mismatch error.
+        net.load_state_dict(copyStateDict(checkpoint['craft']))
+        
+    except KeyError:
+        # Add a fallback for models saved differently (e.g., directly as a state_dict)
+        print("--> [Info] Could not find 'craft' key. Assuming the model is a raw state_dict.")
+        net.load_state_dict(copyStateDict(torch.load(args.trained_model, map_location=device)))
+    
+    # 5. Move the model to the device and set it to evaluation mode
+    net = net.to(device)
+    net.eval()
+    print("Model loaded successfully.")
+    # --- [END] Corrected Model Loading Section ---
+
+    # --- [The rest of your main function for processing images remains the same] ---
     print("Starting dataset generation...")
     for img_name, text in labels.items():
         img_path = os.path.join(args.images_dir, f"{img_name}.jpg")
