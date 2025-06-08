@@ -7,3 +7,4 @@ torch==2.5.1
 torchvision==0.20.1
 wandb==0.19.11
 packaging==23.2
+numpy==1.26.4

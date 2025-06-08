@@ -277,6 +277,26 @@ def perform_inference(net, image_path, text_threshold, link_threshold, low_text,
         cv2.imwrite(mask_file, heatmap_viz)
     return boxes, polys, image
 
+# --- New Helper Function for Sorting ---
+def sort_boxes_left_to_right(polygons: List[np.ndarray]) -> List[np.ndarray]:
+    """
+    Sorts a list of polygons from left to right.
+    It calculates the bounding box for each polygon and uses its top-left x-coordinate as the sorting key.
+    
+    Args:
+        polygons: A list of polygons, where each polygon is a list of points.
+
+    Returns:
+        A new list of polygons sorted from left to right.
+    """
+    if not polygons:
+        return []
+    
+    # Use the x-coordinate of the bounding box for sorting
+    # cv2.boundingRect returns (x, y, w, h)
+    return sorted(polygons, key=lambda poly: cv2.boundingRect(np.array(poly).astype(np.int32))[0])
+
+
 def load_labels(labels_path: str) -> dict:
     """Load labels from CSV into a dictionary: {img_name: text}"""
     labels = {}
@@ -289,125 +309,122 @@ def load_labels(labels_path: str) -> dict:
 
 def split_into_words(text: str) -> List[str]:
     """Split text into words (adjust delimiter as needed for your language)"""
-    # For your example, split by space (assuming your language uses space as word separator)
     return text.split()
 
-def extract_word_region(image: np.ndarray, box_or_poly, padding=5) -> np.ndarray:
-    """Extract region from image based on detected box or polygon, with optional padding."""
-    if isinstance(box_or_poly, list):
-        box_or_poly = np.array(box_or_poly)
-    if box_or_poly is None:
+def extract_word_region(image: np.ndarray, poly: np.ndarray, padding=5) -> np.ndarray:
+    """Extract region from image based on a detected polygon, with optional padding."""
+    if poly is None:
         return None
-    x, y, w, h = cv2.boundingRect(box_or_poly.astype(np.int32))
-    # Apply padding
-    x = max(0, x - padding)
-    y = max(0, y - padding)
-    w = min(image.shape[1] - x, w + 2*padding)
-    h = min(image.shape[0] - y, h + 2*padding)
-    return image[y:y+h, x:x+w]
+        
+    x, y, w, h = cv2.boundingRect(np.array(poly).astype(np.int32))
+    
+    # Apply padding safely
+    x_start = max(0, x - padding)
+    y_start = max(0, y - padding)
+    x_end = min(image.shape[1], x + w + padding)
+    y_end = min(image.shape[0], y + h + padding)
+    
+    return image[y_start:y_end, x_start:x_end]
 
 def main(args):
-    # --- Load labels ---
+    # --- Load labels and create output directories ---
     labels = load_labels(args.labels_path)
-    # --- Create output directories ---
     os.makedirs(args.output_images_dir, exist_ok=True)
+    
     # --- Prepare new labels file ---
     new_labels_path = os.path.join(args.output_dir, 'labels.csv')
-    with open(new_labels_path, 'w', encoding='utf-8') as f:
+    with open(new_labels_path, 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
         writer.writerow(['file', 'text'])
 
     # --- Load CRAFT model (as in your demo.py) ---
+    # This assumes you have the CRAFT class and copyStateDict function available
     net = CRAFT()
-    checkpoint = torch.load(args.trained_model, map_location='cuda' if torch.cuda.is_available() else 'cpu')
-    if 'craft' in checkpoint:
-        model_state_dict = checkpoint['craft']
-    elif 'model' in checkpoint:
-        model_state_dict = checkpoint['model']
-    elif 'state_dict' in checkpoint:
-        model_state_dict = checkpoint['state_dict']
-    else:
-        raise KeyError(f"Could not find model weights in checkpoint. Expected keys like 'craft', 'model', or 'state_dict'. Found: {list(checkpoint.keys())}")
-    net.load_state_dict(copyStateDict(model_state_dict))
     if torch.cuda.is_available():
+        net.load_state_dict(copyStateDict(torch.load(args.trained_model)))
         net = net.cuda()
+    else:
+        net.load_state_dict(copyStateDict(torch.load(args.trained_model, map_location='cpu')))
     net.eval()
 
     # --- Process each image ---
+    print("Starting dataset generation...")
     for img_name, text in labels.items():
         img_path = os.path.join(args.images_dir, f"{img_name}.jpg")
         if not os.path.exists(img_path):
-            print(f"Image not found: {img_path}")
+            print(f"--> [Warning] Image not found, skipping: {img_path}")
             continue
 
+        print(f"Processing: {img_name}.jpg")
+
         # --- Detect text regions ---
+        # This assumes perform_inference returns polygons and the original image
         detected_boxes, detected_polys, original_image = perform_inference(
             net, img_path, args.text_threshold, args.link_threshold, args.low_text,
             torch.cuda.is_available(), args.poly, args.canvas_size, args.mag_ratio
         )
-        if detected_polys is None or original_image is None:
-            print(f"No text detected in {img_name}")
+
+        if not detected_polys or original_image is None:
+            print(f"--> [Info] No text detected in {img_name}. Skipping.")
             continue
+
+        # --- Sort detected polygons from left to right ---
+        sorted_polys = sort_boxes_left_to_right(detected_polys)
 
         # --- Split sentence into words ---
         words = split_into_words(text)
-        if len(words) == 0:
+
+        # --- CRITICAL: Check for mismatches between detections and labels ---
+        if len(sorted_polys) != len(words):
+            print(f"--> [Warning] Mismatch in {img_name}. Detected regions: {len(sorted_polys)}, Words in label: {len(words)}. Skipping this image to ensure data quality.")
+            # For debugging, you can optionally save the image with detected boxes
+            # cv2.imwrite(os.path.join(args.output_dir, f"DEBUG_{img_name}.jpg"), debug_image)
             continue
 
-        # --- For each word, extract and save region ---
-        # NOTE: This assumes detected_polys are in left-to-right order and match the words!
-        # If your script does not guarantee this, you need a way to match detected regions to words.
-        # For now, this is a basic implementation.
-        # (In practice, you may need a more advanced matching algorithm.)
-        if len(detected_polys) != len(words):
-            print(f"Warning: Number of detected regions ({len(detected_polys)}) does not match number of words ({len(words)}) in {img_name}")
-            continue
-
-        for i, (word, poly) in enumerate(zip(words, detected_polys)):
-            if poly is None:
-                if i < len(detected_boxes) and detected_boxes[i] is not None:
-                    poly = detected_boxes[i]
-                else:
-                    print(f"No region found for word {i} in {img_name}")
-                    continue
-
-            # --- Extract and save word region ---
+        # --- Match sorted polygons to words and create new data ---
+        for i, (word, poly) in enumerate(zip(words, sorted_polys)):
+            # --- Extract word region from the original image ---
             word_region = extract_word_region(original_image, poly)
             if word_region is None or word_region.size == 0:
-                print(f"Could not extract region for word {i} in {img_name}")
+                print(f"--> [Warning] Could not extract region for word '{word}' in {img_name}. Skipping word.")
                 continue
 
             # --- Save new image ---
             new_img_name = f"{img_name}_word{i+1}.jpg"
             new_img_path = os.path.join(args.output_images_dir, new_img_name)
+            # CRAFT returns RGB, OpenCV saves in BGR, so we convert color space
             cv2.imwrite(new_img_path, cv2.cvtColor(word_region, cv2.COLOR_RGB2BGR))
 
             # --- Append to new labels file ---
-            with open(new_labels_path, 'a', encoding='utf-8') as f:
+            with open(new_labels_path, 'a', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
                 writer.writerow([new_img_name, word])
 
-    print(f"Dataset generation complete. New images saved to {args.output_images_dir}")
-    print(f"New labels saved to {new_labels_path}")
+    print("\n" + "="*50)
+    print("Dataset generation complete!")
+    print(f"New images saved to: {args.output_images_dir}")
+    print(f"New labels saved to: {new_labels_path}")
+    print("="*50)
+
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Generate word-level dataset from sentence-level images using CRAFT text detection.')
-    parser.add_argument('--images_dir', required=True, help='Directory containing original images (e.g., dataset/images/)')
-    parser.add_argument('--labels_path', required=True, help='Path to original labels CSV (e.g., dataset/labels.csv)')
-    parser.add_argument('--output_dir', required=True, help='Directory to save new dataset and labels')
-    parser.add_argument('--output_images_dir', default='images', help='Subdirectory in output_dir for new images')
-    parser.add_argument('--trained_model', required=True, help='Path to CRAFT model checkpoint (.pth)')
-    parser.add_argument('--text_threshold', type=float, default=0.7, help='Text confidence threshold')
-    parser.add_argument('--low_text', type=float, default=0.4, help='Text low_text threshold')
-    parser.add_argument('--link_threshold', type=float, default=0.4, help='Link confidence threshold')
-    parser.add_argument('--canvas_size', type=int, default=1280, help='Image size for inference')
-    parser.add_argument('--mag_ratio', type=float, default=1.5, help='Image magnification ratio')
-    parser.add_argument('--poly', action='store_true', help='Enable polygon type detection')
+    parser = argparse.ArgumentParser(description='Generate word-level dataset using CRAFT and coordinate-based sorting.')
+    parser.add_argument('--images_dir', type=str, required=True, help='Directory containing original images (e.g., dataset/images/)')
+    parser.add_argument('--labels_path', type=str, required=True, help='Path to original labels CSV (e.g., dataset/labels.csv)')
+    parser.add_argument('--output_dir', type=str, required=True, help='Directory to save new dataset and labels')
+    parser.add_argument('--trained_model', type=str, required=True, help='Path to trained CRAFT model checkpoint (.pth)')
+    
+    # CRAFT parameters (same as demo.py)
+    parser.add_argument('--text_threshold', default=0.7, type=float, help='Text confidence threshold')
+    parser.add_argument('--link_threshold', default=0.4, type=float, help='Link confidence threshold')
+    parser.add_argument('--low_text', default=0.4, type=float, help='Text low_text threshold')
+    parser.add_argument('--poly', default=False, action='store_true', help='Enable polygon type detection')
+    parser.add_argument('--canvas_size', default=1280, type=int, help='Image size for inference')
+    parser.add_argument('--mag_ratio', default=1.5, type=float, help='Image magnification ratio')
+    
     args = parser.parse_args()
 
-    # Ensure output_images_dir is within output_dir
-    args.output_images_dir = os.path.join(args.output_dir, args.output_images_dir)
-    os.makedirs(args.output_images_dir, exist_ok=True)
-    os.makedirs(args.output_dir, exist_ok=True)
-
+    # Define output images directory inside the main output directory
+    args.output_images_dir = os.path.join(args.output_dir, 'images')
+    
     main(args)
