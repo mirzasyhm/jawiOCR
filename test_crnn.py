@@ -577,7 +577,6 @@ class JawiOCREngine:
             final_text_pass1, metric_pass1, _ = run_ocr_pass(
                 image_for_pass1, base_image_filename, "Pass1", self.config,
                 self.craft_net, self.crnn_model, self.crnn_img_transform, # Pass self
-                debug_output_dir_for_image,
                 self.pytorch_device, debug_output_dir_for_image,
                 global_orientation_applied_deg=initial_rotation_applied_deg
             )
