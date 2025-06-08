@@ -35,7 +35,7 @@ trainer:
   _convert_: all
   val_check_interval: 100
   #max_steps: 169680  # 20 epochs x 8484 steps (for batch size = 384, real data)
-  max_epochs: 35
+  max_epochs: 45
   gradient_clip_val: 20
   accelerator: gpu
   devices: 1
