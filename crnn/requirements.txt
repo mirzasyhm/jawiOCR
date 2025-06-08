@@ -8,3 +8,4 @@ huggingface-hub
 editdistance
 numpy==1.26.4
 torchaudio==2.5.1
+flashlight-text

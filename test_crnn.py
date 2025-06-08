@@ -461,6 +461,8 @@ class JawiOCREngine:
         # print("CRNN model loaded successfully.") # Already printed in load_crnn_model_local
         return model, transform, alphabet
     
+    # --- Replace this entire method in the JawiOCREngine class ---
+
     def _decode_crnn_output_with_beam_search(self, log_probs_tensor):
         """
         Decodes CRNN log-probabilities using the best available CTC beam search method.
@@ -488,6 +490,7 @@ class JawiOCREngine:
                 blank_token = "-"
                 decoder_tokens = [blank_token] + self.crnn_alphabet_chars
                 self.beam_search_decoder = ctc_decoder(
+                    lexicon=None,  # <-- THE FIX: Explicitly set lexicon to None for lexicon-free decoding.
                     tokens=decoder_tokens,
                     beam_size=self.config.beam_size,
                     blank_token=blank_token,
@@ -504,7 +507,13 @@ class JawiOCREngine:
             text = "".join(self.beam_search_decoder.idxs_to_tokens(best_hypothesis.tokens))
             return text, confidence
 
-        except (ImportError, AttributeError):
+        except (ImportError, AttributeError) as e:
+            # Check if the error is the one we expect (missing 'decoder') or the new 'lexicon' one
+            if 'lexicon' in str(e):
+                # This handles the case where the user has a new enough version to cause the lexicon error
+                # but our code hadn't been updated yet. We re-raise to avoid silent failure.
+                raise e
+                
             # --- FALLBACK TO LEGACY API (older torchaudio) ---
             if not hasattr(self, 'using_legacy_decoder'):
                 print("INFO: Modern decoder not found. Falling back to legacy 'torchaudio.functional.ctc_decode'.")
@@ -512,9 +521,8 @@ class JawiOCREngine:
             
             from torchaudio.functional import ctc_decode
             
-            # We need to define the character list for the legacy decoder here
-            blank_id = 0 # Legacy decoder assumes blank is at index 0
-            decoder_tokens = self.crnn_alphabet_chars # No blank in this list
+            blank_id = 0 
+            decoder_tokens = self.crnn_alphabet_chars
 
             beam_search_result = ctc_decode(
                 log_probs=log_probs_for_legacy,
@@ -527,10 +535,10 @@ class JawiOCREngine:
                 return "", 0.0
 
             best_hypothesis = beam_search_result[0][0]
-            # The score from functional ctc_decode is also a log-probability
             confidence = torch.exp(best_hypothesis.score).item()
             text = "".join(best_hypothesis.tokens)
             return text, confidence
+
         
     def _load_orientation_model(self): # Remains same as paste.txt
         if hasattr(self.config, 'custom_orientation_model_path') and self.config.custom_orientation_model_path:
