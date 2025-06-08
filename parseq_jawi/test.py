@@ -83,7 +83,7 @@ def main():
     args, unknown = parser.parse_known_args()
     kwargs = parse_model_args(unknown)
 
-    charset_test = (" 0123456789۰۱۲٢۳۴۵۶۷۸۹اآأؤإءئۓۂئےۍېىيےیبپڀتٹثٿجچحخدڈذڎرڑزژسشصضطظعغفقڤڠݢکكڭگڬلمنںوۏههةۃۀہھڽضئکڤݢۏ-‌!\"#$%&'()*+,./;<=>?@[\\]^_`{|}~۔")
+    charset_test = (" 0123456789۰۱۲٢۳۴۵۶۷۸۹اآأؤإءئۓۂئےۍېىيےیبپڀتٹثٿجچحخدڈذڎرڑزژسشصضطظعغفقڤڠݢکكڭگڬلمنںوۏههةۃۀہھڽضئکڤݢۏ-‌!\"#$%&'()*,./;<=>?@[\\]^_`{|}~۔")
     kwargs.update({'charset_test': charset_test})
     print(f'Additional keyword arguments: {kwargs}')
 

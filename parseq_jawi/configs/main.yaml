@@ -7,7 +7,7 @@ defaults:
 model:
   _convert_: all
   img_size: [ 32, 128 ]  # [ height, width ]
-  max_label_length: 30
+  max_label_length: 25
   # The ordering in charset_train matters. It determines the token IDs assigned to each character.
   charset_train: ${model.charset_train}
   # For charset_test, ordering doesn't matter.
@@ -35,7 +35,7 @@ trainer:
   _convert_: all
   val_check_interval: 200
   #max_steps: 169680  # 20 epochs x 8484 steps (for batch size = 384, real data)
-  max_epochs: 25
+  max_epochs: 30
   gradient_clip_val: 20
   accelerator: gpu
   devices: 1
