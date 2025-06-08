@@ -465,24 +465,17 @@ class JawiOCREngine:
 
     # --- Replace this entire method in the JawiOCREngine class ---
 
+# --- Replace this entire method in the JawiOCREngine class ---
+
     def _decode_crnn_output_with_beam_search(self, log_probs_tensor):
         """
         Decodes CRNN log-probabilities using the best available CTC beam search method.
-        Tries the modern torchaudio.models.decoder API first, and falls back to the
-        older torchaudio.functional.ctc_decode API if necessary.
-
-        Args:
-            log_probs_tensor (Tensor): Log-softmax probabilities from the model.
-                                    Shape: (Time, Batch, N_Classes) -> (T, 1, C)
-
-        Returns:
-            tuple: (best_hypothesis_text, confidence_score)
+        It attempts to use the modern torchaudio.models.decoder API and falls back
+        only if that module truly doesn't exist.
         """
         log_probs_for_modern = log_probs_tensor.permute(1, 0, 2)
-        log_probs_for_legacy = log_probs_tensor
-
+        
         blank_token = "-"
-        # --- FIX: Ensure the loaded alphabet does not contain our blank token ---
         alphabet_without_blank = [char for char in self.crnn_alphabet_chars if char != blank_token]
 
         try:
@@ -491,7 +484,6 @@ class JawiOCREngine:
                 print("INFO: Initializing modern torchaudio CTC Beam Search Decoder...")
                 from torchaudio.models.decoder import ctc_decoder
                 
-                # Use the cleaned alphabet to construct the token list
                 decoder_tokens = [blank_token] + alphabet_without_blank
                 
                 self.beam_search_decoder = ctc_decoder(
@@ -499,6 +491,9 @@ class JawiOCREngine:
                     tokens=decoder_tokens,
                     beam_size=self.config.beam_size,
                     blank_token=blank_token,
+                    # --- THE FIX: Explicitly tell the decoder what to use for the silence token. ---
+                    # We'll use our blank token, as it is guaranteed to be in the dictionary.
+                    sil_token=blank_token,
                     nbest=1,
                     log_add=True
                 )
@@ -512,33 +507,15 @@ class JawiOCREngine:
             text = "".join(self.beam_search_decoder.idxs_to_tokens(best_hypothesis.tokens))
             return text, confidence
 
-        except (ImportError, AttributeError, ValueError) as e:
-            # Catch ValueError too, as a fallback just in case
-            # --- FALLBACK TO LEGACY API (older torchaudio) ---
-            if not hasattr(self, 'using_legacy_decoder'):
-                print(f"INFO: Modern decoder failed ({type(e).__name__}). Falling back to legacy 'torchaudio.functional.ctc_decode'.")
-                self.using_legacy_decoder = True
-            
-            from torchaudio.functional import ctc_decode
-            
-            blank_id = 0
-            # The legacy decoder also expects a token list *without* the blank token
-            decoder_tokens_for_legacy = alphabet_without_blank
+        except (ImportError, AttributeError):
+            # This fallback is now only for very old torchaudio versions and should not be triggered in your case.
+            print("FATAL: Could not initialize a CTC beam search decoder. The 'torchaudio' library appears to be a version that is not supported by this script's decoder logic. Please consider updating PyTorch and torchaudio.")
+            # To prevent silent failure, we will exit if no decoder can be made.
+            # As a temporary measure for debugging, you could return a dummy value:
+            # return "DECODER_INIT_FAILED", 0.0
+            import sys
+            sys.exit(1)
 
-            beam_search_result = ctc_decode(
-                log_probs=log_probs_for_legacy,
-                tokens=decoder_tokens_for_legacy,
-                beam_size=self.config.beam_size,
-                blank=blank_id
-            )
-
-            if not beam_search_result or not beam_search_result[0]:
-                return "", 0.0
-
-            best_hypothesis = beam_search_result[0][0]
-            confidence = torch.exp(best_hypothesis.score).item()
-            text = "".join(best_hypothesis.tokens)
-            return text, confidence
 
 
         
