@@ -279,31 +279,48 @@ def preprocess_for_crnn_local(img_crop_bgr, crnn_transform, device):
     img_tensor = crnn_transform(img_crop_bgr).unsqueeze(0) # Add batch dimension
     return img_tensor.to(device)
 
-def decode_crnn_output(preds_tensor, alphabet_chars):
-    """Decodes raw CRNN CTC output (after log_softmax and argmax)."""
-    # preds_tensor shape: (seq_len, num_classes) for a single sample
-    # Or (seq_len, batch_size, num_classes) -> get first sample if batched
-    if preds_tensor.ndim == 3: # (T, N, C) -> (T, C) for first sample
-        preds_tensor = preds_tensor[:, 0, :]
+# --- Add this new function to your script ---
+def decode_with_beam_search(log_probs, beam_search_decoder, alphabet_chars):
+    """
+    Decodes CRNN output using torchaudio's CTCBeamSearch decoder.
 
-    _, pred_indices = preds_tensor.max(1) # Get class indices with max probability
-    pred_indices = pred_indices.tolist()
+    Args:
+        log_probs (Tensor): Log-softmax probabilities from the model.
+                            Shape: (Batch, Time, N_Classes) -> (1, T, C) for us.
+        beam_search_decoder: The initialized torchaudio ctc_decoder object.
+        alphabet_chars (list): List of characters (without blank) for mapping.
+
+    Returns:
+        tuple: (best_hypothesis_text, confidence_score)
+               Returns ("", 0.0) if no valid hypothesis is found.
+    """
+    # The decoder expects log_probs tensor
+    hypotheses = beam_search_decoder(log_probs)
+
+    # For a batch size of 1 and nbest=1, the output is List[List[CTCHypothesis]]
+    if not hypotheses or not hypotheses[0]:
+        return "", 0.0
+
+    best_hypothesis = hypotheses[0][0] # Get the top hypothesis for the first batch item
+
+    # The score is a log-probability, so we convert it to a probability with exp()
+    confidence_score = torch.exp(best_hypothesis.score).item()
+
+    # The tokens are returned as indices. We need to convert them to characters.
+    # The decoder handles the CTC logic (merging repeats, removing blanks).
+    # We join the resulting character tokens to form the final string.
+    # Note: `best_hypothesis.tokens` gives indices, `beam_search_decoder.idxs_to_tokens` can convert them.
+    # Let's manually map for clarity and to ensure it matches our alphabet.
+    # The decoder should already have the alphabet, so `idxs_to_tokens` is cleaner.
     
-    decoded_text = ""
-    last_char_idx = 0 # CTC blank
-    for char_idx in pred_indices:
-        if char_idx == 0: # CTC Blank
-            last_char_idx = 0
-            continue
-        if char_idx == last_char_idx: # Repeated character, already handled by blank logic for CTC
-            continue # For non-blank repeats if model doesn't perfectly separate with blanks
-        
-        if 1 <= char_idx <= len(alphabet_chars):
-            decoded_text += alphabet_chars[char_idx - 1] # alphabet_chars is 0-indexed
-        # else: # Optional: handle unknown index if necessary
-            # print(f"Warning: Unknown index {char_idx} in CRNN decoding.")
-        last_char_idx = char_idx
-    return decoded_text
+    # Get the list of character tokens for the best hypothesis
+    char_tokens = beam_search_decoder.idxs_to_tokens(best_hypothesis.tokens)
+    
+    # Join them to form the final text string
+    best_hypothesis_text = "".join(char_tokens)
+
+    return best_hypothesis_text, confidence_score
+
 
 
 # --- Image Rotation, Custom Orientation, Cropping Utilities ---
@@ -378,9 +395,9 @@ def get_cropped_image_from_poly(image_bgr, poly_pts): # From paste.txt
     return warped_crop if warped_crop.size else None
 
 # --- OCR Pass Function (Modified for CRNN) ---
-def run_ocr_pass(image_bgr_input_for_pass, base_image_filename_for_pass, pass_name, ocr_config, 
-                 craft_net, crnn_model, crnn_img_transform, crnn_alphabet_chars, device, 
-                 debug_output_dir, global_orientation_applied_deg=0):
+def run_ocr_pass(image_bgr_input_for_pass, base_image_filename_for_pass, pass_name, ocr_config,
+                 craft_net, crnn_model, crnn_img_transform, crnn_alphabet_chars, beam_search_decoder, # Added decoder
+                 device, debug_output_dir, global_orientation_applied_deg=0):
     
     detected_polys = perform_craft_inference(
         craft_net, image_bgr_input_for_pass, ocr_config.text_threshold, ocr_config.link_threshold,
@@ -406,7 +423,7 @@ def run_ocr_pass(image_bgr_input_for_pass, base_image_filename_for_pass, pass_na
         sorted_polys = []
 
     pass_text_snippets = []
-    num_successful_recognitions = 0
+    pass_confidences = []
 
     for i, poly_pts in enumerate(sorted_polys):
         cropped_bgr = get_cropped_image_from_poly(image_bgr_input_for_pass, poly_pts)
@@ -428,27 +445,31 @@ def run_ocr_pass(image_bgr_input_for_pass, base_image_filename_for_pass, pass_na
             continue
         
         with torch.no_grad():
-            # CRNN output is (seq_len, batch_size, n_class)
-            # For single image, batch_size is 1.
-            raw_preds = crnn_model(crnn_input_tensor) 
-            # No log_softmax here if CRNN model forward already does it or if CTC loss was used with raw logits for training
-            # If CRNN output is raw logits, apply log_softmax before decoding (common for CTC)
-            preds_log_softmax = raw_preds.log_softmax(2) # Assuming CRNN output is raw logits
-            
-            # For decode_crnn_output, we need (seq_len, n_class) for the first (and only) batch item
-            text_segment = decode_crnn_output(preds_log_softmax.squeeze(1), crnn_alphabet_chars) # squeeze batch dim
+            raw_preds = crnn_model(crnn_input_tensor)
+            # The beam search decoder expects log-softmax probabilities
+            preds_log_softmax = raw_preds.log_softmax(2)
+
+            # --- MODIFIED DECODING STEP ---
+            # Use the new beam search decoder instead of the old greedy one
+            text_segment, confidence = decode_with_beam_search(
+                preds_log_softmax,
+                beam_search_decoder,
+                crnn_alphabet_chars
+            )
             
             if text_segment:
                 pass_text_snippets.append(text_segment)
-                num_successful_recognitions += 1
+                pass_confidences.append(confidence)
             
     # For CRNN, "average confidence" per pass is harder to define meaningfully without per-char probs from CTC.
     # We can use a simpler metric: ratio of recognized segments or just the final text.
     # For now, let's use a placeholder confidence or just rely on text length.
-    pass_confidence_metric = num_successful_recognitions / len(sorted_polys) if sorted_polys else 0.0
+    avg_pass_conf = np.mean(pass_confidences) if pass_confidences else 0.0
     
     final_text = " ".join(pass_text_snippets) # Join R-L sorted snippets
-    return final_text, pass_confidence_metric, None # Last element (pass_results_data) is not used now
+    
+    # Return the text and the new, meaningful confidence score
+    return final_text, avg_pass_conf, None
 
 # --- JawiOCREngine Class (Modified for CRNN) ---
 class JawiOCREngine:
@@ -464,6 +485,7 @@ class JawiOCREngine:
         self.craft_net = self._load_craft_model()
         self.crnn_model, self.crnn_img_transform, self.crnn_alphabet_chars = self._load_crnn_model() # Modified
         self.orientation_model_keras = self._load_orientation_model()
+        self.beam_search_decoder = self._load_decoder()
 
     def _load_craft_model(self): # Remains same as paste.txt
         craft_net = CRAFT()
@@ -489,6 +511,38 @@ class JawiOCREngine:
         )
         # print("CRNN model loaded successfully.") # Already printed in load_crnn_model_local
         return model, transform, alphabet
+    
+    def _load_decoder(self):
+        """Initializes the torchaudio CTC beam search decoder."""
+        print("Initializing CTC Beam Search Decoder...")
+        
+        # The decoder's token set must include the CTC blank token.
+        # By convention, the blank is often at index 0 and represented by a symbol like '-'.
+        # Our CRNN alphabet from json does not include it, so we add it here.
+        # The torchaudio decoder needs the full list of symbols.
+        
+        # Define the blank token symbol
+        blank_token = "-"
+        
+        # Create the token list for the decoder
+        decoder_tokens = [blank_token] + self.crnn_alphabet_chars
+        
+        try:
+            # For lexicon-free decoding, we only need tokens and the blank token definition.
+            # We set a beam size, which can be tuned. 20 is a reasonable start.
+            beam_search_decoder = torchaudio.models.decoder.ctc_decoder(
+                tokens=decoder_tokens,
+                beam_size=self.config.beam_size, # Add beam_size to config
+                blank_token=blank_token,
+                nbest=1, # We only need the single best hypothesis
+                log_add=True, # Use log-domain addition for numerical stability
+            )
+            print("CTC Beam Search Decoder initialized successfully.")
+            return beam_search_decoder
+        except Exception as e:
+            print(f"CRITICAL Error initializing torchaudio CTC decoder: {e}")
+            print("Please ensure 'torchaudio' is installed correctly and compatible with your PyTorch version.")
+            sys.exit(1)
         
     def _load_orientation_model(self): # Remains same as paste.txt
         if hasattr(self.config, 'custom_orientation_model_path') and self.config.custom_orientation_model_path:
@@ -530,12 +584,13 @@ class JawiOCREngine:
                     try: cv2.imwrite(os.path.join(debug_output_dir_for_image, fn), image_for_pass1)
                     except Exception as e: print(f"Err saving oriented page: {e}")
 
-        final_text_pass1, metric_pass1, _ = run_ocr_pass(
-            image_for_pass1, base_image_filename, "Pass1", self.config, 
-            self.craft_net, self.crnn_model, self.crnn_img_transform, self.crnn_alphabet_chars, 
-            self.pytorch_device, debug_output_dir_for_image,
-            global_orientation_applied_deg=initial_rotation_applied_deg
-        )
+            final_text_pass1, metric_pass1, _ = run_ocr_pass(
+                image_for_pass1, base_image_filename, "Pass1", self.config,
+                self.craft_net, self.crnn_model, self.crnn_img_transform, self.crnn_alphabet_chars,
+                self.beam_search_decoder, 
+                self.pytorch_device, debug_output_dir_for_image,
+                global_orientation_applied_deg=initial_rotation_applied_deg
+            )
     
         chosen_final_text = final_text_pass1
         
@@ -544,26 +599,29 @@ class JawiOCREngine:
         # Or, for simplicity, check if text_pass1 is very short or empty.
         # Let's simplify: if pass1 text length is too short relative to detected boxes, or metric is low
         rerun_condition_met = False
-        if not final_text_pass1.strip(): # If no text was recognized
+        if metric_pass1 * 100 < self.config.rerun_180_confidence_threshold:
+            print(f"INFO: Pass 1 confidence ({metric_pass1*100:.2f}%) is below threshold ({self.config.rerun_180_confidence_threshold}%). Rerunning with 180-degree rotation.")
             rerun_condition_met = True
-        elif hasattr(self.config, 'rerun_180_char_threshold') and len(final_text_pass1) < self.config.rerun_180_char_threshold:
-             # Example: rerun if less than X characters and some boxes were detected
-             rerun_condition_met = True # Add more sophisticated logic if needed
-        
-        if rerun_condition_met: # Simplified rerun condition
-            image_for_pass2 = rotate_image_cv(image_for_pass1, 180) # Always rotate 180 from previous pass image
-            # ... [Save debug image for pass2 if enabled] ...
 
+        if rerun_condition_met:
+            image_for_pass2 = rotate_image_cv(image_for_pass1, 180)
+            # ... (save debug image if needed) ...
+            
             final_text_pass2, metric_pass2, _ = run_ocr_pass(
                 image_for_pass2, base_image_filename, "Pass2_180_Rot", self.config,
-                self.craft_net, self.crnn_model, self.crnn_img_transform, self.crnn_alphabet_chars, 
+                self.craft_net, self.crnn_model, self.crnn_img_transform, self.crnn_alphabet_chars,
+                self.beam_search_decoder, # <-- PASS THE DECODER TO 2ND PASS
                 self.pytorch_device, debug_output_dir_for_image,
                 global_orientation_applied_deg=(initial_rotation_applied_deg + 180) % 360
             )
-            # Choose based on which pass produced more text or better metric
-            if len(final_text_pass2) > len(final_text_pass1): # Simple heuristic
+            
+            # Choose the result with the higher confidence score
+            if metric_pass2 > metric_pass1:
                 chosen_final_text = final_text_pass2
-        
+                print(f"INFO: Pass 2 result chosen (Confidence: {metric_pass2*100:.2f}%)")
+            else:
+                print(f"INFO: Pass 1 result kept (Confidence: {metric_pass1*100:.2f}%)")
+                
         return chosen_final_text.strip()
 
 # --- Main E2E Test Session (Modified for CRNN) ---
@@ -590,8 +648,8 @@ def run_e2e_test_session(test_args):
         "orientation_img_size": test_args.orientation_img_size,
         "orientation_confidence_threshold": test_args.orientation_confidence_threshold,
         "use_simple_orientation": test_args.use_simple_orientation,
-        # "rerun_180_threshold": test_args.rerun_180_threshold, # Original was Parseq conf.
-        "rerun_180_char_threshold": test_args.rerun_180_char_threshold, # New threshold for CRNN
+        "rerun_180_confidence_threshold": test_args.rerun_180_confidence_threshold, 
+        "beam_size": test_args.beam_size, 
         "save_debug_crops": test_args.save_debug_crops, "no_cuda": test_args.no_cuda,
         "output_dir": test_args.results_output_dir
     }
@@ -713,8 +771,8 @@ if __name__ == '__main__':
     test_parser.add_argument('--poly', default=False, action='store_true')
     test_parser.add_argument('--use_simple_orientation', action='store_true')
     # MODIFIED: Rerun threshold changed for CRNN context
-    test_parser.add_argument('--rerun_180_char_threshold', type=int, default=5, help="If Pass1 recognized text length is below this, trigger 180-deg re-run.")
-    test_parser.add_argument('--save_debug_crops', action='store_true')
+    test_parser.add_argument('--beam_size', type=int, default=20, help="Beam size for CTC Beam Search Decoder.")
+    test_parser.add_argument('--rerun_180_confidence_threshold', type=float, default=75.0, help="If Pass1 average confidence is below this, trigger 180-deg re-run.")    test_parser.add_argument('--save_debug_crops', action='store_true')
     test_parser.add_argument('--no_cuda', action='store_true')
     
     parsed_test_args = test_parser.parse_args()
