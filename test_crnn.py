@@ -4,6 +4,7 @@ import sys
 import argparse
 import time
 import cv2
+import math
 import numpy as np
 import pandas as pd
 import jiwer 
@@ -464,18 +465,15 @@ class JawiOCREngine:
 
     def _decode_crnn_output_with_beam_search(self, log_probs_tensor):
         """
-        Decodes CRNN log-probabilities using the best available CTC beam search method.
-        It attempts to use the modern torchaudio.models.decoder API and moves data
-        to the CPU as required by the decoder.
+        Decodes CRNN log-probabilities using the modern torchaudio CTC beam search method,
+        moving data to the CPU as required by the decoder.
         """
-        # The tensor needs to be in shape (Batch, Time, N_Classes)
         log_probs_for_modern = log_probs_tensor.permute(1, 0, 2)
         
         blank_token = "-"
         alphabet_without_blank = [char for char in self.crnn_alphabet_chars if char != blank_token]
 
         try:
-            # --- MODERN API (torchaudio >= 2.1) ---
             if not hasattr(self, 'beam_search_decoder'):
                 print("INFO: Initializing modern torchaudio CTC Beam Search Decoder...")
                 from torchaudio.models.decoder import ctc_decoder
@@ -492,21 +490,25 @@ class JawiOCREngine:
                     log_add=True
                 )
 
-            # --- THE FIX: Move the log_probs tensor to the CPU before decoding ---
             hypotheses = self.beam_search_decoder(log_probs_for_modern.cpu())
             
             if not hypotheses or not hypotheses[0]:
                 return "", 0.0
 
             best_hypothesis = hypotheses[0][0]
-            confidence = torch.exp(best_hypothesis.score).item()
+            
+            # --- THE FIX: Use math.exp() for floats instead of torch.exp() for tensors ---
+            # The .item() call is no longer needed as math.exp() returns a float.
+            confidence = math.exp(best_hypothesis.score)
+            
             text = "".join(self.beam_search_decoder.idxs_to_tokens(best_hypothesis.tokens))
             return text, confidence
 
-        except (ImportError, AttributeError):
-            print("FATAL: Could not initialize a CTC beam search decoder. The 'torchaudio' library appears to be a version that is not supported by this script's decoder logic. Please consider updating PyTorch and torchaudio.")
-            import sys
-            sys.exit(1)
+        except Exception as e:
+            print(f"FATAL: A critical error occurred during beam search decoding: {e}")
+            print("Please check your PyTorch and torchaudio installations.")
+            # Returning a dummy value to prevent a hard crash in loops.
+            return "DECODER_RUNTIME_ERROR", 0.0
 
 
         
