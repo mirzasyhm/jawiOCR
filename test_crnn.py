@@ -575,8 +575,10 @@ class JawiOCREngine:
                     except Exception as e: print(f"Err saving oriented page: {e}")
 
             final_text_pass1, metric_pass1, _ = run_ocr_pass(
-                image_for_pass1, base_image_filename, "Pass1", self, # Pass self
+                image_for_pass1, base_image_filename, "Pass1", self.config,
+                self.craft_net, self.crnn_model, self.crnn_img_transform, # Pass self
                 debug_output_dir_for_image,
+                self.pytorch_device, debug_output_dir_for_image,
                 global_orientation_applied_deg=initial_rotation_applied_deg
             )
     
@@ -596,8 +598,9 @@ class JawiOCREngine:
             # ... (save debug image if needed) ...
             
             final_text_pass2, metric_pass2, _ = run_ocr_pass(
-                image_for_pass2, base_image_filename, "Pass2_180_Rot", self, # Pass self
-                debug_output_dir_for_image,
+                image_for_pass2, base_image_filename, "Pass2_180_Rot", self.config,
+                self.craft_net, self.crnn_model, self.crnn_img_transform, 
+                self.pytorch_device, debug_output_dir_for_image,
                 global_orientation_applied_deg=(initial_rotation_applied_deg + 180) % 360
             )
             
