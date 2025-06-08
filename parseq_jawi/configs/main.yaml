@@ -7,7 +7,7 @@ defaults:
 model:
   _convert_: all
   img_size: [ 32, 128 ]  # [ height, width ]
-  max_label_length: 25
+  max_label_length: 30
   # The ordering in charset_train matters. It determines the token IDs assigned to each character.
   charset_train: ${model.charset_train}
   # For charset_test, ordering doesn't matter.
