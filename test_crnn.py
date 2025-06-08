@@ -461,18 +461,14 @@ class JawiOCREngine:
         # print("CRNN model loaded successfully.") # Already printed in load_crnn_model_local
         return model, transform, alphabet
     
-    # --- Replace this entire method in the JawiOCREngine class ---
-
-    # --- Replace this entire method in the JawiOCREngine class ---
-
-# --- Replace this entire method in the JawiOCREngine class ---
 
     def _decode_crnn_output_with_beam_search(self, log_probs_tensor):
         """
         Decodes CRNN log-probabilities using the best available CTC beam search method.
-        It attempts to use the modern torchaudio.models.decoder API and falls back
-        only if that module truly doesn't exist.
+        It attempts to use the modern torchaudio.models.decoder API and moves data
+        to the CPU as required by the decoder.
         """
+        # The tensor needs to be in shape (Batch, Time, N_Classes)
         log_probs_for_modern = log_probs_tensor.permute(1, 0, 2)
         
         blank_token = "-"
@@ -491,14 +487,14 @@ class JawiOCREngine:
                     tokens=decoder_tokens,
                     beam_size=self.config.beam_size,
                     blank_token=blank_token,
-                    # --- THE FIX: Explicitly tell the decoder what to use for the silence token. ---
-                    # We'll use our blank token, as it is guaranteed to be in the dictionary.
                     sil_token=blank_token,
                     nbest=1,
                     log_add=True
                 )
 
-            hypotheses = self.beam_search_decoder(log_probs_for_modern)
+            # --- THE FIX: Move the log_probs tensor to the CPU before decoding ---
+            hypotheses = self.beam_search_decoder(log_probs_for_modern.cpu())
+            
             if not hypotheses or not hypotheses[0]:
                 return "", 0.0
 
@@ -508,14 +504,9 @@ class JawiOCREngine:
             return text, confidence
 
         except (ImportError, AttributeError):
-            # This fallback is now only for very old torchaudio versions and should not be triggered in your case.
             print("FATAL: Could not initialize a CTC beam search decoder. The 'torchaudio' library appears to be a version that is not supported by this script's decoder logic. Please consider updating PyTorch and torchaudio.")
-            # To prevent silent failure, we will exit if no decoder can be made.
-            # As a temporary measure for debugging, you could return a dummy value:
-            # return "DECODER_INIT_FAILED", 0.0
             import sys
             sys.exit(1)
-
 
 
         
