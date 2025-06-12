@@ -1,4 +1,4 @@
-# e2e_jawi_ocr_crnn_greedy_fixed.py
+# e2e_jawi_ocr_crnn_debug_complete.py
 
 import os
 import sys
@@ -50,7 +50,6 @@ def copyStateDict(state_dict):
         return new_state_dict
     return state_dict
 
-# ... [All other utility functions like normalizeMeanVariance, getDetBoxes, etc. remain unchanged] ...
 def normalizeMeanVariance(in_img, mean=(0.485, 0.456, 0.406), variance=(0.229, 0.224, 0.225)):
     img = in_img.copy().astype(np.float32)
     img -= np.array([mean[0] * 255.0, mean[1] * 255.0, mean[2] * 255.0], dtype=np.float32)
@@ -144,7 +143,6 @@ def load_crnn_model_local(model_path, alphabet_path, device):
     n_class = len(alphabet_chars) + 1
     crnn_model = CRNN(imgH=CRNN_IMG_HEIGHT, nc=CRNN_NUM_CHANNELS, nclass=n_class, nh=256)
     try:
-        # Using weights_only=True for security, assuming CRNN model is a pure state_dict
         state_dict = torch.load(model_path, map_location=device, weights_only=True)
         crnn_model.load_state_dict(copyStateDict(state_dict))
     except Exception as e: print(f"CRITICAL Error loading CRNN state_dict: {e}"); sys.exit(1)
@@ -156,7 +154,6 @@ def load_crnn_model_local(model_path, alphabet_path, device):
     print("CRNN model, alphabet, and transform loaded successfully.")
     return crnn_model, crnn_transform, alphabet_chars
 
-# ... [Other utility functions like preprocess_for_crnn, rotate_image_cv, etc. remain unchanged] ...
 def preprocess_for_crnn(img_crop_bgr, crnn_transform, device):
     if img_crop_bgr is None or img_crop_bgr.size == 0: return None
     return crnn_transform(img_crop_bgr).unsqueeze(0).to(device)
@@ -202,27 +199,15 @@ class JawiOCREngine:
         self.orientation_model = self._load_orientation_model()
 
     def _load_craft_model(self, path):
-        """
-        FIXED: Loads a CRAFT model from a file, handling both raw state_dicts
-        and full training checkpoints.
-        """
         net = CRAFT()
         print(f"Loading CRAFT model from: {path}")
-
-        # Load the entire file. It could be a checkpoint or a state_dict.
-        # We don't use weights_only=True here because it IS a checkpoint file with non-tensor data.
         checkpoint = torch.load(path, map_location=self.pytorch_device)
-
-        # Check if the file is a training checkpoint by looking for the 'craft' key.
         if 'craft' in checkpoint.keys():
             print("Checkpoint file detected. Extracting model weights from 'craft' key.")
             model_state_dict = checkpoint['craft']
         else:
-            # Assume the file is a regular state_dict.
             print("Assuming file is a raw state_dict.")
             model_state_dict = checkpoint
-        
-        # Apply the 'module.' prefix fix and load the weights.
         net.load_state_dict(copyStateDict(model_state_dict))
         print("CRAFT model loaded successfully.")
         return net.to(self.pytorch_device).eval()
@@ -236,17 +221,14 @@ class JawiOCREngine:
     def _decode_crnn_output(self, preds_log_softmax):
         _, max_inds = preds_log_softmax.cpu().max(2)
         seq = max_inds[:, 0].tolist()
-        pred_text = ''.join(
-            self.alphabet[c-1] for j, c in enumerate(seq)
-            if c != 0 and (j == 0 or c != seq[j-1])
-        )
+        pred_text = ''.join(self.alphabet[c-1] for j, c in enumerate(seq) if c != 0 and (j == 0 or c != seq[j-1]))
         return pred_text, 1.0
 
     def predict(self, image_path):
         image_bgr = cv2.imread(image_path)
         if image_bgr is None: return ""
         image_to_process, _ = self._orient_page(image_bgr)
-        final_text, _ = self._run_single_ocr_pass(image_to_process)
+        final_text, _ = self._run_single_ocr_pass(image_bgr, image_to_process)
         return final_text.strip()
 
     def _orient_page(self, image_bgr):
@@ -257,16 +239,34 @@ class JawiOCREngine:
         angle = {"90_degrees": 270, "180_degrees": 180, "270_degrees": 90}.get(pred_class, 0)
         return (rotate_image_cv(image_bgr, angle), angle) if angle > 0 else (image_bgr, 0)
 
-    def _run_single_ocr_pass(self, image_bgr_input):
+    def _run_single_ocr_pass(self, original_image_bgr, image_to_process):
         detected_polys = perform_craft_inference(
-            self.craft_net, image_bgr_input, self.config.text_threshold, 
+            self.craft_net, image_to_process, self.config.text_threshold, 
             self.config.link_threshold, self.config.low_text, 
             (self.pytorch_device.type == 'cuda'), self.config.poly)
+        
+        # --- DEBUG: Save detector output ---
+        if self.config.save_debug_detector_output:
+            debug_img = image_to_process.copy()
+            for poly in detected_polys:
+                cv2.polylines(debug_img, [poly], isClosed=True, color=(0, 255, 0), thickness=2)
+            out_path = os.path.join(self.config.results_output_dir, "debug_detector_output.jpg")
+            cv2.imwrite(out_path, debug_img)
+            print(f"Saved detector debug image to: {out_path}")
+
         regions = sorted([p for p in detected_polys if p is not None], key=lambda p: np.mean(p[:, 0]), reverse=True)
         texts = []
-        for poly in regions:
-            crop = get_cropped_image_from_poly(image_bgr_input, poly)
+        for i, poly in enumerate(regions):
+            crop = get_cropped_image_from_poly(image_to_process, poly)
             if self.config.use_simple_orientation: crop = simple_orientation_correction(crop)
+            
+            # --- DEBUG: Save individual crops ---
+            if self.config.save_debug_crops and crop is not None:
+                crops_dir = os.path.join(self.config.results_output_dir, "debug_crops")
+                os.makedirs(crops_dir, exist_ok=True)
+                crop_path = os.path.join(crops_dir, f"crop_{i:03d}.png")
+                cv2.imwrite(crop_path, crop)
+
             crnn_input = preprocess_for_crnn(crop, self.crnn_transform, self.pytorch_device)
             if crnn_input is None: continue
             with torch.no_grad():
@@ -275,8 +275,6 @@ class JawiOCREngine:
                 if text: texts.append(text)
         return " ".join(texts), 1.0
 
-# --- E2E Test Session & Main Execution ---
-# ... [This part of the code remains unchanged] ...
 def run_e2e_test_session(args, engine):
     labels_csv_path = os.path.join(args.dataset_dir, 'labels.csv')
     try: labels_df = pd.read_csv(labels_csv_path)
@@ -298,6 +296,11 @@ def run_e2e_test_session(args, engine):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Jawi OCR Pipeline with CRAFT and CRNN (Greedy Decoder)')
+    # --- ADDED DEBUG ARGUMENTS ---
+    parser.add_argument('--save_debug_detector_output', action='store_true', help='Save an image with detected boxes drawn on it.')
+    parser.add_argument('--save_debug_crops', action='store_true', help='Save each cropped word image before recognition.')
+    
+    # --- Standard Arguments ---
     parser.add_argument('--image_path', type=str, default=None)
     parser.add_argument('--dataset_dir', type=str, default=None)
     parser.add_argument('--craft_model_path', required=True, type=str)
@@ -314,16 +317,22 @@ if __name__ == '__main__':
     parser.add_argument('--orientation_class_names', type=str, default='0_degrees,180_degrees,270_degrees,90_degrees')
     parser.add_argument('--orientation_confidence_threshold', type=float, default=75.0)
     parser.add_argument('--no_cuda', action='store_true')
+    
     args = parser.parse_args()
     cudnn.benchmark = True
+    
+    # Ensure results directory exists before engine initialization
+    os.makedirs(args.results_output_dir, exist_ok=True)
+    
     engine = JawiOCREngine(config=vars(args))
+    
     if args.image_path:
         print(f"\n--- Running prediction on: {args.image_path} ---")
         start_time = time.time()
         final_text = engine.predict(args.image_path)
         print(f"\nRecognized Text: {final_text}\nProcessing Time: {time.time() - start_time:.2f}s")
     elif args.dataset_dir:
-        print(f"\n--- Starting E2E Evaluation on: {args.dataset_dir} ---")
+        print(f"\n--- Starting E2E Evaluation on: {args.d} ---")
         run_e2e_test_session(args, engine)
     else:
         print("Error: Please provide --image_path for single prediction or --dataset_dir for batch evaluation.")
