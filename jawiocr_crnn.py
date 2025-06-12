@@ -26,16 +26,32 @@ except ImportError:
     print("Warning: TensorFlow not found. Custom orientation model functionality will be disabled.")
 
 
-# --- Corrected Package Imports ---
-# This approach treats 'craft' and 'crnn' as packages, which is the standard and correct way.
-# It assumes you run the script from the parent directory of 'craft' and 'crnn'.
+# --- Path Setup ---
+current_script_dir = os.path.dirname(os.path.abspath(__file__))
+# Assuming 'craft' and your CRNN project (e.g., 'crnn_jawi') are structured appropriately
+craft_module_dir = os.path.join(current_script_dir, 'craft') 
+# Assuming your CRNN model and dataset class are in a 'crnn_jawi' directory or similar
+# For this example, let's assume model.py (with CRNN class) and dataset.py (with LMDBOCRDataset for transform)
+# are in the same directory as this e2e script, or an accessible path.
+# If they are in a subdirectory like 'crnn_jawi_files':
+#crnn_module_dir = os.path.join(current_script_dir, 'crnn')
+#if crnn_module_dir not in sys.path: sys.path.insert(0, crnn_module_dir)
+
+if craft_module_dir not in sys.path: sys.path.insert(0, craft_module_dir)
+
+# --- CRAFT Model Import and Utilities ---
+# (Copied from paste.txt [1] - This part remains largely the same)
 try:
-    from craft.model.craft import CRAFT
-    from crnn.model import CRNN
+    from model.craft import CRAFT # From the 'craft' submodule
 except ImportError as e:
-    print(f"CRITICAL Import Error: {e}\n"
-          "Please ensure this script is in the project's root folder (the parent of 'craft' and 'crnn') "
-          "and that both folders contain an '__init__.py' file to be treated as packages.")
+    print(f"Error importing 'CRAFT' from 'model.craft': {e}\nEnsure 'craft' submodule is in the Python path (e.g., in same dir or added to sys.path).")
+    sys.exit(1)
+# --- CRNN Model Import and Utilities ---
+# Assuming your CRNN model definition is in 'model.py' (as created before)
+try:
+    from crnn.model import CRNN # Your CRNN model class
+except ImportError:
+    print("Error: Could not import CRNN from model.py. Ensure model.py is in the Python path.")
     sys.exit(1)
 
 
