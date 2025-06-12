@@ -26,32 +26,25 @@ except ImportError:
     print("Warning: TensorFlow not found. Custom orientation model functionality will be disabled.")
 
 
-# --- Corrected Package Imports ---
-# This approach treats 'craft' and 'crnn' as packages, which is the standard and correct way.
-# It avoids manual sys.path manipulation and the resulting import errors.
+# --- Path Setup ---
+current_script_dir = os.path.dirname(os.path.abspath(__file__))
+craft_module_dir = os.path.join(current_script_dir, 'craft') 
+
+
+if craft_module_dir not in sys.path: sys.path.insert(0, craft_module_dir)
+
+# --- CRAFT Model Import and Utilities ---
+# (Copied from paste.txt [1] - This part remains largely the same)
 try:
-    from craft.model.craft import CRAFT
+    from model.craft import CRAFT # From the 'craft' submodule
 except ImportError as e:
-    print(f"CRITICAL Error importing CRAFT: {e}\n"
-          f"Ensure your directory structure is correct:\n"
-          f"your_project_folder/\n"
-          f"├── jawiocr_crnn.py\n"
-          f"└── craft/\n"
-          f"    └── model/\n"
-          f"        └── craft.py\n"
-          f"And that you run the script from 'your_project_folder'.")
+    print(f"Error importing 'CRAFT' from 'model.craft': {e}\nEnsure 'craft' submodule is in the Python path (e.g., in same dir or added to sys.path).")
     sys.exit(1)
 
 try:
-    from crnn.model import CRNN
-except ImportError as e:
-    print(f"CRITICAL Error importing CRNN: {e}\n"
-          f"Ensure your directory structure is correct:\n"
-          f"your_project_folder/\n"
-          f"├── jawiocr_crnn.py\n"
-          f"└── crnn/\n"
-          f"    └── model.py\n"
-          f"And that you run the script from 'your_project_folder'.")
+    from crnn.model import CRNN # Your CRNN model class
+except ImportError:
+    print("Error: Could not import CRNN from model.py. Ensure model.py is in the Python path.")
     sys.exit(1)
 
 
