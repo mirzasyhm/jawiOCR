@@ -1,21 +1,21 @@
-# jawiocr_crnn.py
-
 import os
 import sys
 import argparse
 import time
 import cv2
-import json
 import math
 import numpy as np
-from collections import OrderedDict
-
+import pandas as pd
+import json
 import torch
 import torch.backends.cudnn as cudnn
+from collections import OrderedDict
 from PIL import Image as PILImage
 from torchvision import transforms as TorchTransforms
+from tqdm import tqdm
+import jiwer
 
-# TensorFlow imports for optional orientation model
+# Optional TensorFlow for custom orientation model
 try:
     import tensorflow as tf
     from tensorflow.keras.preprocessing import image as tf_keras_image
@@ -25,201 +25,213 @@ except ImportError:
     TF_AVAILABLE = False
     print("Warning: TensorFlow not found. Custom orientation model functionality will be disabled.")
 
-
 # --- Path Setup ---
+# Ensure local modules can be found
 current_script_dir = os.path.dirname(os.path.abspath(__file__))
-# Assuming 'craft' and your CRNN project (e.g., 'crnn_jawi') are structured appropriately
-craft_module_dir = os.path.join(current_script_dir, 'craft') 
-# Assuming your CRNN model and dataset class are in a 'crnn_jawi' directory or similar
-# For this example, let's assume model.py (with CRNN class) and dataset.py (with LMDBOCRDataset for transform)
-# are in the same directory as this e2e script, or an accessible path.
-# If they are in a subdirectory like 'crnn_jawi_files':
-#crnn_module_dir = os.path.join(current_script_dir, 'crnn')
-#if crnn_module_dir not in sys.path: sys.path.insert(0, crnn_module_dir)
-
-if craft_module_dir not in sys.path: sys.path.insert(0, craft_module_dir)
+craft_module_dir = os.path.join(current_script_dir, 'craft')
+if craft_module_dir not in sys.path:
+    sys.path.insert(0, craft_module_dir)
 
 # --- CRAFT Model Import and Utilities ---
-# (Copied from paste.txt [1] - This part remains largely the same)
 try:
-    from model.craft import CRAFT # From the 'craft' submodule
+    from model.craft import CRAFT
 except ImportError as e:
-    print(f"Error importing 'CRAFT' from 'model.craft': {e}\nEnsure 'craft' submodule is in the Python path (e.g., in same dir or added to sys.path).")
+    print(f"Error: Could not import 'CRAFT' from 'model.craft': {e}\n"
+          f"Please ensure the 'craft' submodule is in the same directory or Python path.")
     sys.exit(1)
-# --- CRNN Model Import and Utilities ---
-# Assuming your CRNN model definition is in 'model.py' (as created before)
-try:
-    from crnn.model import CRNN # Your CRNN model class
-except ImportError:
-    print("Error: Could not import CRNN from model.py. Ensure model.py is in the Python path.")
-    sys.exit(1)
-
 
 def copyStateDict(state_dict):
-    if list(state_dict.keys())[0].startswith("module."):
+    """Handles loading state_dicts which may have a 'module.' prefix."""
+    if list(state_dict.keys())[0].startswith("module"):
         new_state_dict = OrderedDict()
-        for k, v in state_dict.items(): new_state_dict[k[7:]] = v
+        for k, v in state_dict.items():
+            name = k[7:]  # remove `module.`
+            new_state_dict[name] = v
         return new_state_dict
     return state_dict
 
-# --- Utility Functions ---
-# ... (These are correct and omitted for brevity)
 def normalizeMeanVariance(in_img, mean=(0.485, 0.456, 0.406), variance=(0.229, 0.224, 0.225)):
+    """Normalizes an image for CRAFT model input."""
     img = in_img.copy().astype(np.float32)
     img -= np.array([mean[0] * 255.0, mean[1] * 255.0, mean[2] * 255.0], dtype=np.float32)
     img /= np.array([variance[0] * 255.0, variance[1] * 255.0, variance[2] * 255.0], dtype=np.float32)
     return img
 
 def resize_aspect_ratio(img, square_size, interpolation, mag_ratio=1.):
+    """Resizes an image to a square size while maintaining aspect ratio."""
     height, width, channel = img.shape
     target_size = mag_ratio * max(height, width)
-    if target_size > square_size: target_size = square_size
-    ratio = target_size / max(height, width)
+    if target_size > square_size:
+        target_size = square_size
+    ratio = target_size / max(height, width)    
     target_h, target_w = int(height * ratio), int(width * ratio)
     proc = cv2.resize(img, (target_w, target_h), interpolation=interpolation)
+
     target_h32, target_w32 = target_h, target_w
-    if target_h % 32 != 0: target_h32 = target_h + (32 - target_h % 32)
-    if target_w % 32 != 0: target_w32 = target_w + (32 - target_w % 32)
+    if target_h % 32 != 0:
+        target_h32 = target_h + (32 - target_h % 32)
+    if target_w % 32 != 0:
+        target_w32 = target_w + (32 - target_w % 32)
     resized = np.zeros((target_h32, target_w32, channel), dtype=np.uint8)
     resized[0:target_h, 0:target_w, :] = proc
-    return resized, ratio, (int(target_w32/2), int(target_h32/2))
+    return resized, ratio, (target_w, target_h)
 
-def getDetBoxes(textmap, linkmap, text_threshold, link_threshold, low_text):
-    linkmap_vis, textmap_vis = linkmap.copy(), textmap.copy()
+def getDetBoxes_core(textmap, linkmap, text_threshold, link_threshold, low_text):
+    linkmap = linkmap.copy()
+    textmap = textmap.copy()
     img_h, img_w = textmap.shape
-    ret, text_score = cv2.threshold(textmap_vis, low_text, 1, 0)
-    ret, link_score = cv2.threshold(linkmap_vis, link_threshold, 1, 0)
+
+    _, text_score = cv2.threshold(textmap, low_text, 1, 0)
+    _, link_score = cv2.threshold(linkmap, link_threshold, 1, 0)
     text_score_comb = np.clip(text_score + link_score, 0, 1)
-    nLabels, labels, stats, centroids = cv2.connectedComponentsWithStats(text_score_comb.astype(np.uint8), connectivity=4)
-    det = []
+    
+    nLabels, labels, stats, _ = cv2.connectedComponentsWithStats(text_score_comb.astype(np.uint8), connectivity=4)
+
+    det, mapper = [], []
     for k in range(1, nLabels):
         size = stats[k, cv2.CC_STAT_AREA]
         if size < 10: continue
-        if np.max(textmap_vis[labels == k]) < text_threshold: continue
+
+        if np.max(textmap[labels==k]) < text_threshold: continue
+        
         segmap = np.zeros(textmap.shape, dtype=np.uint8)
-        segmap[labels == k] = 255
-        segmap[np.logical_and(link_score == 1, text_score == 0)] = 0
+        segmap[labels==k] = 255
+        segmap[np.logical_and(link_score==1, text_score==0)] = 0
+        
         x, y = stats[k, cv2.CC_STAT_LEFT], stats[k, cv2.CC_STAT_TOP]
         w, h = stats[k, cv2.CC_STAT_WIDTH], stats[k, cv2.CC_STAT_HEIGHT]
+        
         niter = int(math.sqrt(size * min(w, h) / (w * h))) * 2 if w > 0 and h > 0 else 0
         sx, ex, sy, ey = x - niter, x + w + niter + 1, y - niter, y + h + niter + 1
-        sx, ex, sy, ey = max(0, sx), min(img_w, ex), max(0, sy), min(img_h, ey)
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1 + niter, 1 + niter))
+        
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT,(1 + niter, 1 + niter))
         segmap[sy:ey, sx:ex] = cv2.dilate(segmap[sy:ey, sx:ex], kernel)
-        np_contours = np.roll(np.array(np.where(segmap != 0)), 1, axis=0).transpose().reshape(-1, 2)
+        
+        np_contours = np.roll(np.array(np.where(segmap!=0)),1,axis=0).transpose().reshape(-1,2)
         if np_contours.size == 0: continue
+
         rectangle = cv2.minAreaRect(np_contours)
         box = cv2.boxPoints(rectangle)
+        
+        w_box, h_box = np.linalg.norm(box[0] - box[1]), np.linalg.norm(box[1] - box[2])
+        if abs(1 - max(w_box, h_box) / (min(w_box, h_box) + 1e-5)) <= 0.1:
+            l, r = min(np_contours[:,0]), max(np_contours[:,0])
+            t, b = min(np_contours[:,1]), max(np_contours[:,1])
+            box = np.array([[l, t], [r, t], [r, b], [l, b]], dtype=np.float32)
+        
         startidx = box.sum(axis=1).argmin()
-        box = np.roll(box, 4 - startidx, 0)
+        box = np.roll(box, 4-startidx, 0)
         det.append(box)
-    return det
+        mapper.append(k)
+        
+    return det, labels, mapper
 
-def perform_craft_inference(net, image_bgr, text_threshold, link_threshold, low_text, cuda, canvas_size=1280, mag_ratio=1.5):
+def getPoly_core(boxes, labels, mapper, linkmap):
+    num_cp, max_len_ratio, step_r = 5, 0.7, 0.2
+    polys = []
+    for k, box in enumerate(boxes):
+        w = int(np.linalg.norm(box[0] - box[1])) + 1
+        h = int(np.linalg.norm(box[1] - box[2])) + 1
+        if w < 10 or h < 10:
+            polys.append(None); continue
+
+        target = np.float32([[0,0],[w,0],[w,h],[0,h]])
+        M = cv2.getPerspectiveTransform(box, target)
+        word_label = cv2.warpPerspective(labels, M, (w, h), flags=cv2.INTER_NEAREST)
+        try:
+            Minv = np.linalg.inv(M)
+        except np.linalg.LinAlgError:
+            polys.append(None); continue
+            
+        word_label[word_label != mapper[k]] = 0
+        polys.append(box)
+    return polys
+
+def getDetBoxes(textmap, linkmap, text_threshold, link_threshold, low_text, poly=False):
+    boxes, labels, mapper = getDetBoxes_core(textmap, linkmap, text_threshold, link_threshold, low_text)
+    if poly:
+        polys = getPoly_core(boxes, labels, mapper, linkmap)
+    else:
+        polys = [None] * len(boxes)
+    return boxes, polys
+
+def perform_craft_inference(net, image_bgr, text_threshold, link_threshold, low_text, cuda, poly, canvas_size=1280, mag_ratio=1.5):
     image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
     img_resized, target_ratio, _ = resize_aspect_ratio(image_rgb, canvas_size, cv2.INTER_LINEAR, mag_ratio)
+    
     x = normalizeMeanVariance(img_resized)
     x = torch.from_numpy(x).permute(2, 0, 1).unsqueeze(0)
-    if cuda: x = x.cuda()
+    if cuda:
+        x = x.cuda()
+
     with torch.no_grad():
         y, _ = net(x)
-    score_text = y[0, :, :, 0].cpu().data.numpy()
-    score_link = y[0, :, :, 1].cpu().data.numpy()
-    boxes = getDetBoxes(score_text, score_link, text_threshold, link_threshold, low_text)
-    return [(poly * 2 / target_ratio) for poly in boxes]
 
-
-# --- CORRECTED PREPROCESSING TRANSFORM ---
-class ResizeNormalize(object):
-    """A class to correctly resize and normalize images for CRNN models."""
-    def __init__(self, img_height, interpolation=PILImage.LANCZOS):
-        self.img_height = img_height
-        self.interpolation = interpolation
-        self.toTensor = TorchTransforms.ToTensor()
-
-    def __call__(self, img):
-        # Resize height to the target height, adjusting width proportionally
-        w, h = img.size
-        ratio = self.img_height / float(h)
-        new_w = int(w * ratio)
-        img = img.resize((new_w, self.img_height), self.interpolation)
-        
-        # Convert to tensor and normalize to [-1, 1] range
-        img = self.toTensor(img)
-        img.sub_(0.5).div_(0.5)
-        return img
-
-# --- CRNN Model Setup ---
-CRNN_IMG_HEIGHT = 32
-CRNN_NUM_CHANNELS = 1
-
-def load_crnn_model(model_path, alphabet_path, device):
-    print(f"Loading CRNN model from: {model_path}")
-    if not os.path.exists(alphabet_path):
-        print(f"CRITICAL Error: Alphabet file '{alphabet_path}' not found."); sys.exit(1)
-    with open(alphabet_path, 'r', encoding='utf-8') as f:
-        alphabet_chars = json.load(f)
+    score_text = y[0,:,:,0].cpu().data.numpy()
+    score_link = y[0,:,:,1].cpu().data.numpy()
     
-    n_class = len(alphabet_chars) + 1
-    model = CRNN(imgH=CRNN_IMG_HEIGHT, nc=CRNN_NUM_CHANNELS, nclass=n_class, nh=256)
+    boxes, polys = getDetBoxes(score_text, score_link, text_threshold, link_threshold, low_text, poly)
+    
+    results_to_scale = polys if poly and any(p is not None for p in polys) else boxes
+    
+    final_polys = []
+    for p_map in results_to_scale:
+        if p_map is None: continue
+        scaled_poly = p_map * 2 * (1 / target_ratio)
+        final_polys.append(scaled_poly.astype(np.int32))
+        
+    return final_polys
+
+# --- CRNN Model Import and Utilities ---
+try:
+    from crnn.model import CRNN
+except ImportError:
+    print("Error: Could not import CRNN from crnn/model.py. "
+          "Please ensure the model definition file is accessible.")
+    sys.exit(1)
+
+CRNN_IMG_HEIGHT = 32
+CRNN_IMG_WIDTH = 128
+CRNN_NUM_CHANNELS = 1 # Grayscale
+
+def load_crnn_model_local(model_path, alphabet_path, device):
+    """Loads a CRNN model and its corresponding alphabet."""
+    if not os.path.exists(alphabet_path):
+        print(f"CRITICAL Error: Alphabet file '{alphabet_path}' not found.")
+        sys.exit(1)
+    try:
+        with open(alphabet_path, 'r', encoding='utf-8') as f:
+            alphabet_chars = json.load(f)
+    except Exception as e:
+        print(f"CRITICAL Error loading alphabet file: {e}"); sys.exit(1)
+        
+    n_class = len(alphabet_chars) + 1  # +1 for CTC blank
+    crnn_model = CRNN(imgH=CRNN_IMG_HEIGHT, nc=CRNN_NUM_CHANNELS, nclass=n_class, nh=256)
     
     try:
         state_dict = torch.load(model_path, map_location=device)
-        model.load_state_dict(copyStateDict(state_dict))
+        crnn_model.load_state_dict(copyStateDict(state_dict))
     except Exception as e:
         print(f"CRITICAL Error loading CRNN state_dict: {e}"); sys.exit(1)
-
-    model = model.to(device).eval()
+        
+    crnn_model.to(device).eval()
     
-    # --- USE THE CORRECT TRANSFORM ---
-    transform = ResizeNormalize(img_height=CRNN_IMG_HEIGHT)
-    
-    print("CRNN model and correct preprocessor loaded successfully.")
-    return model, transform, alphabet_chars
+    crnn_transform = TorchTransforms.Compose([
+        TorchTransforms.ToPILImage(),
+        TorchTransforms.Resize((CRNN_IMG_HEIGHT, CRNN_IMG_WIDTH)),
+        TorchTransforms.Grayscale(num_output_channels=1),
+        TorchTransforms.ToTensor(),
+        TorchTransforms.Normalize(mean=[0.5], std=[0.5])
+    ])
+    print("CRNN model, alphabet, and transform loaded successfully.")
+    return crnn_model, crnn_transform, alphabet_chars
 
 def preprocess_for_crnn(img_crop_bgr, crnn_transform, device):
     if img_crop_bgr is None or img_crop_bgr.size == 0: return None
-    # Convert BGR (OpenCV) to Grayscale PIL Image for the transform
-    img_pil_gray = PILImage.fromarray(cv2.cvtColor(img_crop_bgr, cv2.COLOR_BGR2GRAY))
-    img_tensor = crnn_transform(img_pil_gray)
-    return img_tensor.unsqueeze(0).to(device)
+    img_tensor = crnn_transform(img_crop_bgr).unsqueeze(0)
+    return img_tensor.to(device)
 
-
-# --- DECODERS (Logic is now correct and verified) ---
-def decode_greedy(preds, alphabet):
-    """Greedy decoder that perfectly matches the training validation logic."""
-    probs, max_inds = preds.cpu().softmax(2).max(2)
-    seq = max_inds[:, 0].tolist()
-    seq_probs = probs[:, 0].tolist()
-    raw_text, conf_scores = [], []
-    for j, c in enumerate(seq):
-        if c != 0 and (j == 0 or c != seq[j-1]):
-            raw_text.append(alphabet[c - 1])
-            conf_scores.append(seq_probs[j])
-    final_text = "".join(raw_text)
-    confidence = np.mean(conf_scores) if conf_scores else 0.0
-    return final_text, float(confidence)
-
-def decode_beam_search(log_probs, alphabet, beam_size=20):
-    """Beam search decoder aligned with the training setup."""
-    try:
-        from torchaudio.models.decoder import ctc_decoder
-    except ImportError:
-        print("Error: torchaudio is required. `pip install torchaudio`"); return "DECODER_ERROR", 0.0
-    blank_token = "<BLANK>"
-    decoder_tokens = [blank_token] + alphabet
-    decoder = ctc_decoder(
-        lexicon=None, tokens=decoder_tokens, beam_size=beam_size,
-        blank_token=blank_token, sil_token=blank_token, nbest=1, log_add=True
-    )
-    hypotheses = decoder(log_probs.cpu())
-    if not hypotheses or not hypotheses[0]: return "", 0.0
-    best_hypothesis = hypotheses[0][0]
-    return "".join(decoder.idxs_to_tokens(best_hypothesis.tokens)), math.exp(best_hypothesis.score)
-
-
-# --- IMAGE UTILITIES AND MAIN PIPELINE (Unchanged) ---
-# ... (for brevity, these functions are omitted but are identical to the previous version)
+# --- General Image Utilities (Orientation, Cropping) ---
 def rotate_image_cv(image_cv, angle_degrees):
     if angle_degrees == 90: return cv2.rotate(image_cv, cv2.ROTATE_90_CLOCKWISE)
     if angle_degrees == 180: return cv2.rotate(image_cv, cv2.ROTATE_180)
@@ -227,160 +239,229 @@ def rotate_image_cv(image_cv, angle_degrees):
     return image_cv
 
 def load_custom_orientation_model_keras(model_path):
-    if not TF_AVAILABLE: print("Cannot load Keras model: TensorFlow is not installed."); return None
-    print(f"Loading Keras orientation model from {model_path}...")
+    if not TF_AVAILABLE: return None
     try:
         model = tf.keras.models.load_model(model_path)
         print("Keras orientation model loaded successfully.")
         return model
     except Exception as e:
-        print(f"Error loading Keras orientation model: {e}"); return None
+        print(f"Warning: Could not load Keras orientation model from {model_path}: {e}")
+        return None
 
-def get_custom_page_orientation(orientation_model, image_bgr, class_names, target_img_size=(224, 224)):
+def get_custom_page_orientation(orientation_model, image_bgr, class_names):
     if not TF_AVAILABLE or orientation_model is None: return "0_degrees", 1.0
-    pil_img = PILImage.fromarray(cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)).resize(target_img_size, PILImage.Resampling.LANCZOS)
+    pil_img = PILImage.fromarray(cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)).resize((224, 224), PILImage.Resampling.LANCZOS)
     img_array = tf_keras_image.img_to_array(pil_img)
-    if img_array.shape[-1] == 1:
-        img_array = tf.image.grayscale_to_rgb(tf.convert_to_tensor(img_array)).numpy()
-    preprocessed_img = resnet50_preprocess_input(np.expand_dims(img_array, axis=0).copy())
+    img_batch = np.expand_dims(img_array, axis=0)
+    preprocessed_img = resnet50_preprocess_input(img_batch)
+    
     predictions = orientation_model.predict(preprocessed_img, verbose=0)
-    return class_names[np.argmax(predictions[0])], np.max(predictions[0])
+    pred_index = np.argmax(predictions[0])
+    confidence = np.max(predictions[0])
+    return class_names[pred_index], confidence
 
-def simple_orientation_correction(image_crop_bgr):
-    if image_crop_bgr is None or image_crop_bgr.size == 0: return image_crop_bgr, "invalid_crop"
-    h, w = image_crop_bgr.shape[:2]
-    if w < h and w > 0:
-        return cv2.rotate(image_crop_bgr, cv2.ROTATE_90_COUNTERCLOCKWISE), "rotated_90_ccw"
-    return image_crop_bgr, "no_rotation"
+def simple_orientation_correction(crop_bgr):
+    if crop_bgr is None or crop_bgr.size == 0: return crop_bgr
+    h, w = crop_bgr.shape[:2]
+    if h > w and w > 0:
+        return cv2.rotate(crop_bgr, cv2.ROTATE_90_COUNTERCLOCKWISE)
+    return crop_bgr
 
 def get_cropped_image_from_poly(image_bgr, poly_pts):
     if poly_pts is None or len(poly_pts) != 4: return None
-    poly = np.asarray(poly_pts, dtype=np.float32)
-    target_w = int(round(max(np.linalg.norm(poly[1] - poly[0]), np.linalg.norm(poly[2] - poly[3]))))
-    target_h = int(round(max(np.linalg.norm(poly[3] - poly[0]), np.linalg.norm(poly[2] - poly[1]))))
-    if target_w <= 0 or target_h <= 0: return None
-    dst_pts = np.array([[0, 0], [target_w-1, 0], [target_w-1, target_h-1], [0, target_h-1]], dtype=np.float32)
-    M = cv2.getPerspectiveTransform(poly, dst_pts)
-    return cv2.warpPerspective(image_bgr, M, (target_w, target_h))
-
-def run_ocr_pass(image_bgr, base_fname, pass_name, args, craft_net, crnn_model, crnn_transform, crnn_alphabet, device, debug_dir):
-    print(f"\n--- Starting OCR Pass: {pass_name} ---")
-    detected_polys = perform_craft_inference(
-        craft_net, image_bgr, args.text_threshold, args.link_threshold,
-        args.low_text, (device.type == 'cuda'), args.canvas_size, args.mag_ratio
-    )
-    print(f"{pass_name} - CRAFT detected {len(detected_polys)} regions.")
-    regions = sorted([{'x': int(np.mean(p[:, 0])), 'poly': p} for p in detected_polys], key=lambda item: item['x'], reverse=True)
-    results_data, text_snippets = [], []
-
-    for i, region in enumerate(regions):
-        cropped_bgr = get_cropped_image_from_poly(image_bgr, region['poly'])
-        if cropped_bgr is None: continue
-        crop_for_crnn = cropped_bgr
-        if args.use_simple_orientation:
-            crop_for_crnn, _ = simple_orientation_correction(cropped_bgr)
-        crnn_input = preprocess_for_crnn(crop_for_crnn, crnn_transform, device)
-        if crnn_input is None: continue
-        
-        with torch.no_grad():
-            preds = crnn_model(crnn_input)
-            
-            if args.decoder == 'greedy':
-                text_seg, conf = decode_greedy(preds, crnn_alphabet)
-            else:
-                log_probs = preds.log_softmax(2)
-                text_seg, conf = decode_beam_search(log_probs, crnn_alphabet, args.beam_size)
-
-            if text_seg:
-                print(f"{pass_name} Region {i+1}: Text='{text_seg}', Conf={conf:.4f}")
-                results_data.append({'poly': region['poly'].tolist(), 'text': text_seg, 'conf': conf})
-                text_snippets.append(text_seg)
-            
-    avg_conf = np.mean([res['conf'] for res in results_data if 'conf' in res and res['conf'] is not None]) if results_data else 0.0
-    final_text = " ".join(text_snippets)
-    print(f"{pass_name} - Avg Confidence: {avg_conf:.4f}, Combined Text: {final_text}")
-    return final_text, avg_conf, results_data
-
-def main_ocr_pipeline(args):
-    device = torch.device('cuda' if not args.no_cuda and torch.cuda.is_available() else 'cpu')
-    print(f"Using PyTorch device: {device}")
-
-    craft_net = CRAFT()
-    print(f'Loading CRAFT model from: {args.craft_model_path}')
-    checkpoint = torch.load(args.craft_model_path, map_location=device)
-    if 'craft' in checkpoint:
-        craft_net.load_state_dict(copyStateDict(checkpoint['craft']))
-    else:
-        craft_net.load_state_dict(copyStateDict(checkpoint))
-    craft_net.to(device).eval()
-    print("CRAFT model loaded successfully.")
-
-    crnn_model, crnn_transform, crnn_alphabet = load_crnn_model(
-        args.crnn_model_path, args.alphabet_path, device
-    )
-    orientation_model = load_custom_orientation_model_keras(args.custom_orientation_model_path) if args.custom_orientation_model_path else None
     
-    print(f"Processing image: {args.image_path}")
-    image_bgr_original = cv2.imread(args.image_path)
-    if image_bgr_original is None: print(f"Error: Could not read image {args.image_path}"); return
+    poly = np.asarray(poly_pts, dtype=np.float32)
+    rect = np.zeros((4, 2), dtype="float32")
+    s = poly.sum(axis=1)
+    rect[0] = poly[np.argmin(s)]
+    rect[2] = poly[np.argmax(s)]
+    diff = np.diff(poly, axis=1)
+    rect[1] = poly[np.argmin(diff)]
+    rect[3] = poly[np.argmax(diff)]
+    
+    w = max(np.linalg.norm(rect[1] - rect[0]), np.linalg.norm(rect[2] - rect[3]))
+    h = max(np.linalg.norm(rect[3] - rect[0]), np.linalg.norm(rect[2] - rect[1]))
+    target_w, target_h = int(round(w)), int(round(h))
+    if target_w <= 0 or target_h <= 0: return None
+    
+    dst_pts = np.array([[0, 0], [target_w-1, 0], [target_w-1, target_h-1], [0, target_h-1]], dtype=np.float32)
+    M = cv2.getPerspectiveTransform(rect, dst_pts)
+    warped_crop = cv2.warpPerspective(image_bgr, M, (target_w, target_h))
+    return warped_crop
 
-    image_for_pass1 = image_bgr_original.copy()
-    if orientation_model:
-        class_names = args.orientation_class_names.split(',')
-        pred_class, pred_conf = get_custom_page_orientation(orientation_model, image_bgr_original, class_names)
-        print(f"Global Page Orientation Prediction: {pred_class} (Conf: {pred_conf:.2f})")
-        if pred_conf * 100 >= args.orientation_confidence_threshold:
-            if pred_class == "90_degrees": image_for_pass1 = rotate_image_cv(image_for_pass1, 270)
-            elif pred_class == "270_degrees": image_for_pass1 = rotate_image_cv(image_for_pass1, 90)
+# --- Main OCR Engine Class ---
+class JawiOCREngine:
+    def __init__(self, config):
+        self.config = argparse.Namespace(**config)
+        self.pytorch_device = torch.device('cuda' if not self.config.no_cuda and torch.cuda.is_available() else 'cpu')
+        print(f"JawiOCREngine using device: {self.pytorch_device}")
 
-    final_text_pass1, avg_conf_pass1, _ = run_ocr_pass(
-        image_for_pass1, os.path.basename(args.image_path), "Pass1", args, 
-        craft_net, crnn_model, crnn_transform, crnn_alphabet, device, ""
-    )
+        self.craft_net = self._load_craft_model(self.config.craft_model_path)
+        self.crnn_model, self.crnn_transform, self.alphabet = self._load_crnn_model(self.config.crnn_model_path, self.config.alphabet_path)
+        self.orientation_model = self._load_orientation_model()
 
-    chosen_text, chosen_pass_name = final_text_pass1, "Pass1"
-    if avg_conf_pass1 * 100 < args.rerun_180_threshold:
-        print(f"\nPass 1 conf ({avg_conf_pass1*100:.2f}%) is below threshold. Re-running with 180-deg rotation.")
-        image_for_pass2 = rotate_image_cv(image_for_pass1, 180)
-        final_text_pass2, avg_conf_pass2, _ = run_ocr_pass(
-            image_for_pass2, os.path.basename(args.image_path), "Pass2_180_Rot", args,
-            craft_net, crnn_model, crnn_transform, crnn_alphabet, device, ""
+    def _load_craft_model(self, path):
+        net = CRAFT()
+        state_dict = torch.load(path, map_location=self.pytorch_device)
+        net.load_state_dict(copyStateDict(state_dict))
+        return net.to(self.pytorch_device).eval()
+
+    def _load_crnn_model(self, model_path, alphabet_path):
+        return load_crnn_model_local(model_path, alphabet_path, self.pytorch_device)
+        
+    def _load_orientation_model(self):
+        return load_custom_orientation_model_keras(self.config.custom_orientation_model_path) if self.config.custom_orientation_model_path else None
+
+    def _decode_crnn_output(self, preds_log_softmax):
+        """
+        Decodes CRNN output using the user-specified greedy decoding method.
+        """
+        # Get the most likely character index at each time step
+        _, max_inds = preds_log_softmax.cpu().max(2)
+        
+        # The pipeline processes one crop at a time, so batch size (N) is 1.
+        seq = max_inds[:, 0].tolist()
+        
+        # Reconstruct text by removing blank tokens (0) and consecutive duplicates
+        pred_text = ''.join(
+            self.alphabet[c-1] for j, c in enumerate(seq)
+            if c != 0 and (j == 0 or c != seq[j-1])
         )
-        if avg_conf_pass2 > avg_conf_pass1:
-            print("Pass 2 confidence is higher. Using Pass 2 results.")
-            chosen_text, chosen_pass_name = final_text_pass2, "Pass2_180_Rot"
+        
+        # Greedy decoding does not provide a confidence score. Returning 1.0 as a placeholder.
+        confidence = 1.0 
+        return pred_text, confidence
+
+    def predict(self, image_path):
+        image_bgr = cv2.imread(image_path)
+        if image_bgr is None: return ""
+
+        # Use orientation model if available to get the best page orientation first
+        image_to_process, _ = self._orient_page(image_bgr)
+        
+        # Run a single OCR pass on the oriented image
+        final_text, _ = self._run_single_ocr_pass(image_to_process)
+        
+        return final_text.strip()
+
+    def _orient_page(self, image_bgr):
+        if not self.orientation_model: return image_bgr, 0
+        class_names = self.config.orientation_class_names.split(',')
+        pred_class, conf = get_custom_page_orientation(self.orientation_model, image_bgr, class_names)
+        if conf * 100 < self.config.orientation_confidence_threshold: return image_bgr, 0
+        
+        rotations = {"90_degrees": 270, "180_degrees": 180, "270_degrees": 90}
+        angle = rotations.get(pred_class, 0)
+        if angle > 0:
+            return rotate_image_cv(image_bgr, angle), angle
+        return image_bgr, 0
+
+    def _run_single_ocr_pass(self, image_bgr_input):
+        detected_polys = perform_craft_inference(
+            self.craft_net, image_bgr_input, self.config.text_threshold, 
+            self.config.link_threshold, self.config.low_text, 
+            (self.pytorch_device.type == 'cuda'), self.config.poly
+        )
+
+        regions = sorted([p for p in detected_polys if p is not None], key=lambda p: np.mean(p[:, 0]), reverse=True)
+        
+        texts, confs = [], []
+        for poly in regions:
+            crop = get_cropped_image_from_poly(image_bgr_input, poly)
+            if self.config.use_simple_orientation: crop = simple_orientation_correction(crop)
+            
+            crnn_input = preprocess_for_crnn(crop, self.crnn_transform, self.pytorch_device)
+            if crnn_input is None: continue
+            
+            with torch.no_grad():
+                raw_preds = self.crnn_model(crnn_input)
+                preds_log_softmax = raw_preds.log_softmax(2).permute(1, 0, 2)
+                text, conf = self._decode_crnn_output(preds_log_softmax)
+                if text:
+                    texts.append(text)
+                    confs.append(conf)
+            
+        return " ".join(texts), np.mean(confs) if confs else 0.0
+
+# --- E2E Test Session ---
+def run_e2e_test_session(args, engine):
+    labels_csv_path = os.path.join(args.dataset_dir, 'labels.csv')
+    try:
+        labels_df = pd.read_csv(labels_csv_path)
+    except FileNotFoundError:
+        print(f"Error: labels.csv not found at {labels_csv_path}"); return
+
+    if args.limit_test_to > 0:
+        labels_df = labels_df.head(args.limit_test_to)
+
+    gts, preds = [], []
+    for _, row in tqdm(labels_df.iterrows(), total=len(labels_df), desc="Evaluating Dataset"):
+        img_path = os.path.join(args.dataset_dir, 'images', row['file'])
+        if os.path.exists(img_path):
+            gts.append(str(row['text']).strip())
+            preds.append(engine.predict(img_path))
         else:
-            print("Pass 1 confidence is higher. Sticking with Pass 1 results.")
+            print(f"Warning: Image not found {img_path}")
 
-    print(f"\n--- Final Chosen Result (from {chosen_pass_name}) ---\nFinal Combined Text:\n{chosen_text}\n")
-    if args.output_dir:
-        os.makedirs(args.output_dir, exist_ok=True)
-        txt_path = os.path.join(args.output_dir, f"res_{os.path.splitext(os.path.basename(args.image_path))[0]}.txt")
-        with open(txt_path, 'w', encoding='utf-8') as f: f.write(chosen_text)
-        print(f"Final text saved to: {txt_path}")
-    print("OCR pipeline finished.")
+    wer = jiwer.wer(gts, preds) * 100
+    cer = jiwer.cer(gts, preds) * 100
+    
+    print("\n--- Evaluation Results ---")
+    print(f"Word Error Rate (WER): {wer:.2f}%")
+    print(f"Character Error Rate (CER): {cer:.2f}%")
 
+    if args.results_output_dir:
+        os.makedirs(args.results_output_dir, exist_ok=True)
+        results_df = pd.DataFrame({'file': labels_df['file'], 'ground_truth': gts, 'prediction': preds})
+        results_df.to_csv(os.path.join(args.results_output_dir, "e2e_crnn_greedy_test_results.csv"), index=False, encoding='utf-8-sig')
+        print(f"Detailed results saved to {args.results_output_dir}")
 
+# --- Main Execution ---
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Jawi OCR with CRAFT and CRNN')
-    parser.add_argument('--decoder', type=str, default='greedy', choices=['greedy', 'beam'], help="CTC decoder: 'greedy' (exact match to training) or 'beam' (more accurate).")
-    parser.add_argument('--image_path', required=True, type=str, help="Path to input image.")
-    parser.add_argument('--craft_model_path', required=True, type=str, help="Path to CRAFT model (.pth).")
-    parser.add_argument('--crnn_model_path', required=True, type=str, help="Path to CRNN model (.pth).")
-    parser.add_argument('--alphabet_path', required=True, type=str, help="Path to alphabet.json.")
-    parser.add_argument('--custom_orientation_model_path', type=str, default=None, help="Optional Keras page orientation model.")
-    parser.add_argument('--output_dir', default='./jawi_ocr_crnn_results/', type=str, help="Directory to save output.")
-    parser.add_argument('--text_threshold', default=0.7, type=float, help="CRAFT text confidence threshold.")
-    parser.add_argument('--low_text', default=0.4, type=float, help="CRAFT text low-bound score.")
-    parser.add_argument('--link_threshold', default=0.4, type=float, help="CRAFT link confidence threshold.")
-    parser.add_argument('--canvas_size', default=1280, type=int, help="Max image size for CRAFT.")
-    parser.add_argument('--mag_ratio', default=1.5, type=float, help="Image magnification ratio for CRAFT.")
-    parser.add_argument('--beam_size', type=int, default=20, help="Beam size for beam search decoder.")
-    parser.add_argument('--use_simple_orientation', action='store_true', help="Enable per-crop orientation correction.")
-    parser.add_argument('--rerun_180_threshold', type=float, default=85.0, help="Confidence threshold to trigger 180-degree re-run.")
-    parser.add_argument('--orientation_class_names', type=str, default='0_degrees,180_degrees,270_degrees,90_degrees', help="Class names for orientation model.")
-    parser.add_argument('--orientation_confidence_threshold', type=float, default=75.0, help="Confidence threshold for global page rotation.")
-    parser.add_argument('--no_cuda', action='store_true', help="Disable CUDA.")
-
+    parser = argparse.ArgumentParser(description='Jawi OCR Pipeline with CRAFT and CRNN (Greedy Decoder)')
+    # Modes
+    parser.add_argument('--image_path', type=str, default=None, help="Path to a single image for prediction.")
+    parser.add_argument('--dataset_dir', type=str, default=None, help="Path to dataset for batch evaluation.")
+    
+    # Model Paths
+    parser.add_argument('--craft_model_path', required=True, type=str)
+    parser.add_argument('--crnn_model_path', required=True, type=str)
+    parser.add_argument('--alphabet_path', required=True, type=str)
+    parser.add_argument('--custom_orientation_model_path', type=str, default=None)
+    
+    # Output and Debug
+    parser.add_argument('--results_output_dir', default='./ocr_results/', type=str)
+    parser.add_argument('--save_debug_crops', action='store_true')
+    parser.add_argument('--limit_test_to', type=int, default=0, help="Limit evaluation to first N images.")
+    
+    # OCR Parameters
+    parser.add_argument('--text_threshold', default=0.7, type=float)
+    parser.add_argument('--link_threshold', default=0.4, type=float)
+    parser.add_argument('--low_text', default=0.4, type=float)
+    parser.add_argument('--poly', default=False, action='store_true')
+    parser.add_argument('--canvas_size', default=1280, type=int)
+    parser.add_argument('--mag_ratio', default=1.5, type=float)
+    parser.add_argument('--use_simple_orientation', action='store_true')
+    parser.add_argument('--orientation_class_names', type=str, default='0_degrees,180_degrees,270_degrees,90_degrees')
+    parser.add_argument('--orientation_confidence_threshold', type=float, default=75.0)
+    parser.add_argument('--no_cuda', action='store_true')
+    
     args = parser.parse_args()
-    main_ocr_pipeline(args)
+    cudnn.benchmark = True
+
+    ocr_config = vars(args)
+    engine = JawiOCREngine(config=ocr_config)
+
+    if args.image_path:
+        print(f"\n--- Running prediction on single image: {args.image_path} ---")
+        start_time = time.time()
+        final_text = engine.predict(args.image_path)
+        end_time = time.time()
+        print(f"\nRecognized Text: {final_text}")
+        print(f"Processing Time: {end_time - start_time:.2f} seconds")
+    elif args.dataset_dir:
+        print(f"\n--- Starting E2E Evaluation on dataset: {args.dataset_dir} ---")
+        run_e2e_test_session(args, engine)
+    else:
+        print("Error: Please provide either --image_path for a single prediction "
+              "or --dataset_dir for batch evaluation.")
