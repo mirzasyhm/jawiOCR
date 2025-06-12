@@ -135,12 +135,14 @@ def run_demo(args):
     cuda = (not args.no_cuda and torch.cuda.is_available())
     device = torch.device('cuda' if cuda else 'cpu')
     # Load models
-    craft_net = CRAFT()
     ckpt = torch.load(args.craft_model_path, map_location=device)
     if 'state_dict' in ckpt:
         craft_sd = ckpt['state_dict']
+    elif 'craft' in ckpt:
+        craft_sd = ckpt['craft']
     else:
         craft_sd = ckpt
+    craft_net = CRAFT()
     craft_net.load_state_dict(copyStateDict(craft_sd))
     craft_net = craft_net.to(device).eval()
 
