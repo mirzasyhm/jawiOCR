@@ -39,7 +39,7 @@ if crnn_module_dir not in sys.path: sys.path.insert(0, crnn_module_dir)
 # --- CRAFT Model Import and Utilities ---
 # These functions are for text detection and are adapted from the provided scripts [1, 2].
 try:
-    from model.craft import CRAFT
+    from model import CRAFT
 except ImportError as e:
     print(f"Error importing 'CRAFT' from 'model.craft': {e}\n"
           f"Ensure the 'craft' submodule is structured correctly and accessible from sys.path.")
