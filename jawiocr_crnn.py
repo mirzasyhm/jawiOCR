@@ -166,18 +166,40 @@ def preprocess_for_crnn(img_crop_bgr, crnn_transform, device):
 
 # --- VERIFIED Greedy Decoder ---
 def decode_greedy(preds, alphabet):
-    """Greedy decoder that perfectly matches the training validation logic."""
-    preds = preds.squeeze(1) # -> (T, C)
-    probs, max_inds = preds.cpu().max(1)
-    
-    raw_text = []
-    for i, c in enumerate(max_inds):
-        if c != 0: # 0 is the blank index
-            if i == 0 or c != max_inds[i - 1]:
-                raw_text.append(alphabet[c - 1]) # The c-1 mapping is correctly applied here
-    
-    confidence = probs[max_inds != 0].mean().item() if any(max_inds != 0) else 0.0
-    return "".join(raw_text), confidence
+    """
+    Greedy CTC decoder matching the validation logic:
+      - removes blank tokens (index 0)
+      - collapses consecutive repeats
+      - computes mean confidence over non-blank frames
+    Args:
+      preds: Tensor of shape (T, 1, C) or (T, C), already log-softmaxed over dim=1
+      alphabet: list or string mapping class indices 1.. to characters
+    Returns:
+      text (str), confidence (float)
+    """
+    # squeeze out any singleton batch/channel dim
+    if preds.dim() == 3:
+        preds = preds.squeeze(1)  # -> (T, C)
+    # get max log-prob and argmax over classes
+    probs, max_inds = preds.cpu().max(dim=1)  # both size (T,)
+    seq = max_inds.tolist()                    # turn into plain list of ints
+
+    # collapse repeats & drop blanks
+    decoded_chars = [
+        alphabet[c - 1]
+        for i, c in enumerate(seq)
+        if c != 0 and (i == 0 or c != seq[i - 1])
+    ]
+    text = ''.join(decoded_chars)
+
+    # mean confidence over all non-blank frames
+    non_blank_mask = max_inds != 0
+    if non_blank_mask.any():
+        confidence = probs[non_blank_mask].mean().item()
+    else:
+        confidence = 0.0
+
+    return text, confidence
 
 # --- CORRECTED: Beam Search Decoder (to match training) ---
 def decode_beam_search(log_probs, alphabet, beam_size=20):
