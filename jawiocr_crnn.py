@@ -32,18 +32,40 @@ current_script_dir = os.path.dirname(os.path.abspath(__file__))
 craft_module_dir = os.path.join(current_script_dir, 'craft')
 crnn_module_dir = os.path.join(current_script_dir, 'crnn')
 
+# Temporarily add the 'craft' directory to the path to import the CRAFT model
 if craft_module_dir not in sys.path: sys.path.insert(0, craft_module_dir)
-if crnn_module_dir not in sys.path: sys.path.insert(0, crnn_module_dir)
 
 
 # --- CRAFT Model Import and Utilities ---
-# These functions are for text detection and are adapted from the provided scripts [1, 2].
+# This import now targets the 'craft.py' file inside the 'model' package within the 'craft' directory.
 try:
-    from model import CRAFT
+    # CORRECTED IMPORT for the craft/model/craft.py structure
+    from model.craft import CRAFT
 except ImportError as e:
     print(f"Error importing 'CRAFT' from 'model.craft': {e}\n"
-          f"Ensure the 'craft' submodule is structured correctly and accessible from sys.path.")
+          f"Ensure the structure is 'craft/model/craft.py' and it is accessible from sys.path.")
     sys.exit(1)
+
+# Clean up sys.path to prevent import conflicts with CRNN's 'model.py'
+if craft_module_dir in sys.path: sys.path.remove(craft_module_dir)
+# Now, add the 'crnn' directory to the path
+if crnn_module_dir not in sys.path: sys.path.insert(0, crnn_module_dir)
+
+
+# --- CRNN Model Import and Utilities ---
+# This import targets the 'model.py' file inside the 'crnn' directory.
+try:
+    from model import CRNN
+except ImportError as e:
+    print(f"Error importing 'CRNN' from 'model': {e}\n"
+          f"Ensure a 'model.py' file containing the CRNN class exists within the 'crnn' directory.")
+    sys.exit(1)
+
+# Clean up the crnn path from sys.path
+if crnn_module_dir in sys.path: sys.path.remove(crnn_module_dir)
+# Restore the craft path for any potential later use if necessary
+if craft_module_dir not in sys.path: sys.path.insert(0, craft_module_dir)
+
 
 def copyStateDict(state_dict):
     """Handles model state dictionaries saved with 'module.' prefix."""
@@ -116,7 +138,6 @@ def perform_craft_inference(net, image_bgr, text_threshold, link_threshold, low_
     """Runs a full text detection pass with CRAFT."""
     image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
     img_resized, target_ratio, _ = resize_aspect_ratio(image_rgb, canvas_size, cv2.INTER_LINEAR, mag_ratio)
-    ratio_h = ratio_w = 1 / target_ratio
     x = normalizeMeanVariance(img_resized)
     x = torch.from_numpy(x).permute(2, 0, 1).unsqueeze(0)
     if cuda: x = x.cuda()
@@ -135,15 +156,7 @@ def perform_craft_inference(net, image_bgr, text_threshold, link_threshold, low_
     return final_polys
 
 
-# --- CRNN Model Import and Utilities ---
-# These functions are for text recognition using the CRNN model [2].
-try:
-    from model import CRNN
-except ImportError:
-    print("Error: Could not import CRNN from model.py. Ensure the 'crnn' directory and its 'model.py' are in the Python path.")
-    sys.exit(1)
-
-# Define CRNN default parameters
+# --- CRNN Model Setup ---
 CRNN_IMG_HEIGHT = 32
 CRNN_IMG_WIDTH = 128
 CRNN_NUM_CHANNELS = 1 # CRNN model expects grayscale images
@@ -173,7 +186,6 @@ def load_crnn_model(model_path, alphabet_path, device):
 
     model = model.to(device).eval()
     
-    # Transformation pipeline for CRNN input images
     transform = TorchTransforms.Compose([
         TorchTransforms.ToPILImage(),
         TorchTransforms.Resize((CRNN_IMG_HEIGHT, CRNN_IMG_WIDTH)),
@@ -193,7 +205,6 @@ def preprocess_for_crnn(img_crop_bgr, crnn_transform, device):
 
 def decode_crnn_output(log_probs, alphabet, beam_size=20):
     """Decodes CRNN raw output using a CTC beam search decoder."""
-    # This function requires torchaudio to be installed.
     try:
         from torchaudio.models.decoder import ctc_decoder
     except ImportError:
@@ -202,7 +213,6 @@ def decode_crnn_output(log_probs, alphabet, beam_size=20):
 
     log_probs_for_decoder = log_probs.permute(1, 0, 2) # T, N, C -> required by decoder
     blank_token = "-"
-    # Ensure alphabet for decoder does not contain the blank token itself
     decoder_alphabet = [char for char in alphabet if char != blank_token]
     
     decoder = ctc_decoder(
@@ -214,20 +224,16 @@ def decode_crnn_output(log_probs, alphabet, beam_size=20):
         nbest=1,
         log_add=True
     )
-
     hypotheses = decoder(log_probs_for_decoder.cpu())
     if not hypotheses or not hypotheses[0]:
         return "", 0.0
-
     best_hypothesis = hypotheses[0][0]
     confidence = math.exp(best_hypothesis.score)
     text = "".join(decoder.idxs_to_tokens(best_hypothesis.tokens))
-    
     return text, confidence
 
 
-# --- Image Utilities (Rotation, Cropping, Orientation) ---
-# These utility functions are adapted from the provided scripts [1, 2].
+# --- Image Utilities ---
 def rotate_image_cv(image_cv, angle_degrees):
     """Rotates an OpenCV image by 90, 180, or 270 degrees."""
     if angle_degrees == 90: return cv2.rotate(image_cv, cv2.ROTATE_90_CLOCKWISE)
@@ -436,19 +442,4 @@ if __name__ == '__main__':
     parser.add_argument('--low_text', default=0.4, type=float, help="Text low-bound score for CRAFT.")
     parser.add_argument('--link_threshold', default=0.4, type=float, help="Link confidence threshold for CRAFT.")
     parser.add_argument('--canvas_size', default=1280, type=int, help="Maximum image size for CRAFT processing.")
-    parser.add_argument('--mag_ratio', default=1.5, type=float, help="Image magnification ratio for CRAFT.")
-    
-    # CRNN Parameters
-    parser.add_argument('--beam_size', type=int, default=20, help="Beam size for the CTC Beam Search Decoder.")
-
-    # Pipeline Control Arguments
-    parser.add_argument('--use_simple_orientation', action='store_true', help="Enable simple per-crop orientation correction.")
-    parser.add_argument('--rerun_180_threshold', type=float, default=85.0, help="Confidence threshold below which a 180-degree re-run is triggered.")
-    parser.add_argument('--orientation_class_names', type=str, default='0_degrees,180_degrees,270_degrees,90_degrees', help="Class names for the Keras orientation model.")
-    parser.add_argument('--orientation_confidence_threshold', type=float, default=75.0, help="Confidence threshold for applying global page rotation.")
-    
-    # System Arguments
-    parser.add_argument('--no_cuda', action='store_true', help="Disable CUDA, forcing CPU usage.")
-    
-    args = parser.parse_args()
-    main_ocr_pipeline(args)
+    parser.add_import('model.craft', __name__)
