@@ -180,9 +180,15 @@ def decode_crnn_output(log_probs, alphabet, beam_size=20):
     except ImportError:
         print("Error: torchaudio is required. `pip install torchaudio`"); return "DECODER_ERROR", 0.0
 
+     
+    blank_token = "-"
+    # Create a list of tokens for the decoder, ensuring the blank token is not duplicated.
+    decoder_tokens = [char for char in alphabet if char != blank_token]
+    decoder_tokens.insert(0, blank_token) # Ensure blank is at index 0
+
     decoder = ctc_decoder(
-        lexicon=None, tokens=["-"] + alphabet, beam_size=beam_size,
-        blank_token="-", sil_token="|", nbest=1, log_add=True
+        lexicon=None, tokens=decoder_tokens, beam_size=beam_size,
+        blank_token=blank_token, sil_token="|", nbest=1, log_add=True # Using a different sil_token is safer
     )
     hypotheses = decoder(log_probs.permute(1, 0, 2).cpu())
     if not hypotheses or not hypotheses[0]: return "", 0.0
