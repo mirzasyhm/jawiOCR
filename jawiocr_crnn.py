@@ -191,7 +191,7 @@ def decode_beam_search(log_probs, alphabet, beam_size=20):
     # We define a unique blank token. The `tokens` list for the decoder will then be
     # ['<blank>', 'alif', 'ba', 'ta', ...], which correctly maps model output index 1
     # to the first character, index 2 to the second, etc.
-    blank_token = " "
+    blank_token = ">"
     decoder_tokens = [blank_token] + alphabet
 
     decoder = ctc_decoder(
