@@ -10,6 +10,24 @@ from PIL import Image as PILImage
 from torchvision import transforms as TorchTransforms
 import json
 
+# --- Path Setup ---
+current_script_dir = os.path.dirname(os.path.abspath(__file__))
+craft_module_dir = os.path.join(current_script_dir, 'craft')
+#crnn_module_dir = os.path.join(current_script_dir, 'crnn')
+
+if craft_module_dir not in sys.path: sys.path.insert(0, craft_module_dir)
+#if crnn_module_dir not in sys.path: sys.path.insert(0, crnn_module_dir)
+print(f"Adjusted sys.path. Current sys.path[0:3]: {sys.path[0:3]}")
+print(f"TensorFlow version: {tf.__version__}")
+gpus_tf = tf.config.list_physical_devices('GPU')
+if gpus_tf: print(f"TensorFlow Found GPUs: {gpus_tf}")
+else: print("TensorFlow: No GPU found.")
+# --- CRAFT Model Import and Utilities ---
+try:
+    from model.craft import CRAFT
+except ImportError as e:
+    print(f"Error importing 'CRAFT' from 'model.craft': {e}\nLooked in: {craft_module_dir}"); sys.exit(1)
+
 # --- CRAFT Utilities (from jawiocr.py) ---
 def copyStateDict(state_dict):
     new_state_dict = OrderedDict()
