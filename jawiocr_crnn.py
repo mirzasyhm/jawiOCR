@@ -288,7 +288,7 @@ def get_cropped_image_from_poly(image_bgr, poly_pts):
     warped_crop = cv2.warpPerspective(image_bgr, M, (target_w, target_h))
     return warped_crop if warped_crop.size else None
 
-# --- OCR Pass Function (Modified for Greedy Decoding) ---
+# --- OCR Pass Function ---
 def run_ocr_pass(image_bgr_input_for_pass, base_image_filename_for_pass, pass_name, ocr_engine,
                  debug_output_dir, global_orientation_applied_deg=0):
     
@@ -342,7 +342,6 @@ def run_ocr_pass(image_bgr_input_for_pass, base_image_filename_for_pass, pass_na
             raw_preds = ocr_engine.crnn_model(crnn_input_tensor)
             preds_log_softmax = raw_preds.log_softmax(2)
 
-            # MODIFIED: Call the new greedy decoder
             text_segment, confidence = ocr_engine._decode_crnn_output_with_greedy_search(preds_log_softmax)
             
             if text_segment:
@@ -354,7 +353,7 @@ def run_ocr_pass(image_bgr_input_for_pass, base_image_filename_for_pass, pass_na
     
     return final_text, avg_pass_conf, None
 
-# --- JawiOCREngine Class (Modified for Greedy Decoding) ---
+# --- JawiOCREngine Class ---
 class JawiOCREngine:
     def __init__(self, craft_model_path, crnn_model_path, alphabet_path, ocr_config_dict):
         self.config = argparse.Namespace(**ocr_config_dict)
@@ -393,47 +392,29 @@ class JawiOCREngine:
         )
         return model, transform, alphabet
     
-    # REPLACED: The beam search decoder is replaced with a greedy decoder.
     def _decode_crnn_output_with_greedy_search(self, log_probs_tensor):
         """
         Decodes CRNN log-probabilities using a simple greedy (best path) decoding.
-        This is a replacement for the beam search decoder, based on the logic
-        from the provided `evaluate.py` file.
         """
-        # Ensure tensor is on CPU for processing
         log_probs_cpu = log_probs_tensor.cpu()
-        
-        # Get the max probability and indices at each time step.
-        # Input shape: (T, B, C), where B=1 for single-crop inference.
-        # Output shape of max: (T, B)
         max_probs, pred_indices_batch = log_probs_cpu.max(2)
-
-        # Squeeze the batch dimension (B=1)
         pred_indices_sample = pred_indices_batch.squeeze(1).tolist()
         max_probs_sample = max_probs.squeeze(1)
 
-        # --- Greedy Decoding Logic ---
         decoded_chars = []
         confidence_scores = []
         
         for i, char_index in enumerate(pred_indices_sample):
-            # Ignore CTC blank label (0)
             if char_index == 0:
                 continue
-            # Ignore consecutive duplicate characters
             if i > 0 and char_index == pred_indices_sample[i - 1]:
                 continue
             
-            # Map index to character. Model outputs class `c` (1 to N) for a character,
-            # which maps to index `c-1` in our alphabet list.
-            decoded_chars.append(self.crnn_alphabet_chars[char_index])
-            # Store the probability of the chosen character for confidence calculation
+            decoded_chars.append(self.crnn_alphabet_chars[char_index - 1])
             confidence_scores.append(max_probs_sample[i].item())
 
         final_text = "".join(decoded_chars)
 
-        # Calculate confidence as the mean of the probabilities of chosen characters.
-        # Input is log-softmax, so we must exponentiate to get probabilities.
         if confidence_scores:
             confidence = np.mean([math.exp(score) for score in confidence_scores])
         else:
@@ -518,7 +499,54 @@ class JawiOCREngine:
                 
         return chosen_final_text.strip()
 
-# --- Main E2E Test Session (Modified for CRNN) ---
+# --- NEW: Function to handle single image prediction ---
+def run_single_image_prediction(args):
+    """Initializes the engine and runs OCR on a single image."""
+    if not os.path.exists(args.image_path):
+        print(f"Error: Image file not found at '{args.image_path}'")
+        sys.exit(1)
+    
+    # Check for required model paths
+    if not args.craft_model_path or not args.crnn_model_path or not args.alphabet_path:
+        print("Error: For single image prediction, you must provide --craft_model_path, --crnn_model_path, and --alphabet_path.")
+        sys.exit(1)
+
+    ocr_config = {
+        "text_threshold": args.text_threshold, "link_threshold": args.link_threshold,
+        "low_text": args.low_text, "poly": args.poly, "canvas_size": args.canvas_size,
+        "mag_ratio": args.mag_ratio, 
+        "custom_orientation_model_path": args.custom_orientation_model_path if TF_AVAILABLE else None,
+        "orientation_class_names": args.orientation_class_names,
+        "orientation_img_size": args.orientation_img_size,
+        "orientation_confidence_threshold": args.orientation_confidence_threshold,
+        "use_simple_orientation": args.use_simple_orientation,
+        "rerun_180_confidence_threshold": args.rerun_180_confidence_threshold, 
+        "save_debug_crops": args.save_debug_crops, "no_cuda": args.no_cuda,
+        "output_dir": args.results_output_dir 
+    }
+
+    print("Initializing JawiOCREngine for single prediction...")
+    ocr_engine = JawiOCREngine(
+        craft_model_path=args.craft_model_path,
+        crnn_model_path=args.crnn_model_path,
+        alphabet_path=args.alphabet_path,
+        ocr_config_dict=ocr_config
+    )
+    print("Engine initialized.")
+
+    print(f"\nRunning OCR on: {args.image_path}")
+    start_time = time.time()
+    predicted_text = ocr_engine.predict(args.image_path)
+    end_time = time.time()
+
+    print("\n" + "="*20)
+    print("     OCR RESULT")
+    print("="*20)
+    print(predicted_text)
+    print("="*20)
+    print(f"\nProcessed in {end_time - start_time:.2f} seconds.")
+
+# --- E2E Test Session (Batch Evaluation) ---
 def run_e2e_test_session(test_args):
     labels_csv_path = os.path.join(test_args.dataset_dir, 'labels.csv')
     try: labels_df = pd.read_csv(labels_csv_path)
@@ -546,14 +574,14 @@ def run_e2e_test_session(test_args):
         "output_dir": test_args.results_output_dir
     }
 
-    print("Initializing JawiOCREngine with CRNN...")
+    print("Initializing JawiOCREngine for batch evaluation...")
     ocr_engine = JawiOCREngine(
         craft_model_path=test_args.craft_model_path,
         crnn_model_path=test_args.crnn_model_path,
         alphabet_path=test_args.alphabet_path,
         ocr_config_dict=ocr_config
     )
-    print("JawiOCREngine with CRNN initialized.")
+    print("JawiOCREngine initialized.")
 
     all_ground_truths = []
     all_predictions = []
@@ -630,33 +658,45 @@ if __name__ == '__main__':
     
     cudnn.benchmark = True
 
-    test_parser = argparse.ArgumentParser(description='JawiOCR End-to-End Test (CRAFT + CRNN with Greedy Decoding)')
-    test_parser.add_argument('--dataset_dir', required=True, type=str, help="Path to dataset (must contain 'images/' and 'labels.csv')")
-    test_parser.add_argument('--results_output_dir', default='./e2e_jawiocr_crnn_results/', type=str, help="Output directory")
+    # MODIFIED: Updated parser description
+    parser = argparse.ArgumentParser(description='JawiOCR: Run on a single image or perform batch evaluation.')
     
-    test_parser.add_argument('--craft_model_path', required=True, type=str, help="Path to CRAFT model (.pth)")
-    test_parser.add_argument('--crnn_model_path', required=True, type=str, help="Path to pre-trained CRNN model (.pth state_dict)")
-    test_parser.add_argument('--alphabet_path', required=True, type=str, help="Path to alphabet.json for CRNN")
+    # --- Mode Selection Arguments ---
+    parser.add_argument('--image_path', type=str, default=None, help="Path to a single image file for direct OCR.")
+    # MODIFIED: Made dataset_dir optional
+    parser.add_argument('--dataset_dir', type=str, default=None, help="Path to evaluation dataset (must contain 'images/' and 'labels.csv').")
+    
+    # --- Model and Path Arguments (Required for both modes) ---
+    parser.add_argument('--craft_model_path', required=True, type=str, help="Path to CRAFT model (.pth).")
+    parser.add_argument('--crnn_model_path', required=True, type=str, help="Path to pre-trained CRNN model (.pth state_dict).")
+    parser.add_argument('--alphabet_path', required=True, type=str, help="Path to alphabet.json for CRNN.")
+    parser.add_argument('--custom_orientation_model_path', type=str, default=None, help="Path to Keras orientation model (.h5).")
 
-    test_parser.add_argument('--custom_orientation_model_path', type=str, default=None, help="Path to Keras orientation model (.h5)")
-    test_parser.add_argument('--limit_test_to_n_images', type=int, default=0, help="Limit the test to the first N images. Set to 0 to process all images (default).")
+    # --- Configuration and Hyperparameters ---
+    parser.add_argument('--results_output_dir', default='./jawiocr_results/', type=str, help="Output directory for results and debug files.")
+    parser.add_argument('--limit_test_to_n_images', type=int, default=0, help="For batch evaluation, limit to the first N images (0 for all).")
+    parser.add_argument('--orientation_class_names', type=str, default='0_degrees,180_degrees,270_degrees,90_degrees')
+    parser.add_argument('--orientation_img_size', type=int, default=224)
+    parser.add_argument('--orientation_confidence_threshold', type=float, default=75.0)
+    parser.add_argument('--text_threshold', default=0.7, type=float)
+    parser.add_argument('--low_text', default=0.4, type=float)
+    parser.add_argument('--link_threshold', default=0.4, type=float)
+    parser.add_argument('--canvas_size', default=1280, type=int)
+    parser.add_argument('--mag_ratio', default=1.5, type=float)
+    parser.add_argument('--poly', default=False, action='store_true')
+    parser.add_argument('--use_simple_orientation', action='store_true')
+    parser.add_argument('--rerun_180_confidence_threshold', type=float, default=75.0, help="If Pass1 confidence is below this, trigger 180-deg re-run.")
+    parser.add_argument('--save_debug_crops', action='store_true')
+    parser.add_argument('--no_cuda', action='store_true')
     
-    # OCR Parameters
-    test_parser.add_argument('--orientation_class_names', type=str, default='0_degrees,180_degrees,270_degrees,90_degrees')
-    test_parser.add_argument('--orientation_img_size', type=int, default=224)
-    test_parser.add_argument('--orientation_confidence_threshold', type=float, default=75.0)
-    test_parser.add_argument('--text_threshold', default=0.7, type=float)
-    test_parser.add_argument('--low_text', default=0.4, type=float)
-    test_parser.add_argument('--link_threshold', default=0.4, type=float)
-    test_parser.add_argument('--canvas_size', default=1280, type=int)
-    test_parser.add_argument('--mag_ratio', default=1.5, type=float)
-    test_parser.add_argument('--poly', default=False, action='store_true')
-    test_parser.add_argument('--use_simple_orientation', action='store_true')
-    # MODIFIED: beam_size argument is removed as it is no longer used
-    test_parser.add_argument('--rerun_180_confidence_threshold', type=float, default=75.0, help="If Pass1 average confidence is below this, trigger 180-deg re-run.")
-    test_parser.add_argument('--save_debug_crops', action='store_true')
-    test_parser.add_argument('--no_cuda', action='store_true')
-    
-    parsed_test_args = test_parser.parse_args()
+    args = parser.parse_args()
         
-    run_e2e_test_session(parsed_test_args)
+    # --- Main Logic: Decide which mode to run ---
+    if args.image_path:
+        run_single_image_prediction(args)
+    elif args.dataset_dir:
+        run_e2e_test_session(args)
+    else:
+        print("Error: No mode selected. You must provide either --image_path for single image OCR or --dataset_dir for batch evaluation.")
+        parser.print_help()
+        sys.exit(1)
