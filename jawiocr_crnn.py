@@ -164,7 +164,7 @@ def preprocess_for_crnn(img_crop_bgr, crnn_transform, device):
     if img_crop_bgr is None or img_crop_bgr.size == 0: return None
     return crnn_transform(img_crop_bgr).unsqueeze(0).to(device)
 
-# --- CORRECTED: Greedy Decoder (to match training) ---
+# --- VERIFIED Greedy Decoder ---
 def decode_greedy(preds, alphabet):
     """Greedy decoder that perfectly matches the training validation logic."""
     preds = preds.squeeze(1) # -> (T, C)
@@ -174,9 +174,7 @@ def decode_greedy(preds, alphabet):
     for i, c in enumerate(max_inds):
         if c != 0: # 0 is the blank index
             if i == 0 or c != max_inds[i - 1]:
-                # --- THIS IS THE CRITICAL FIX ---
-                # The model's output index `c` maps to `alphabet[c-1]`
-                raw_text.append(alphabet[c - 1])
+                raw_text.append(alphabet[c - 1]) # The c-1 mapping is correctly applied here
     
     confidence = probs[max_inds != 0].mean().item() if any(max_inds != 0) else 0.0
     return "".join(raw_text), confidence
@@ -193,7 +191,7 @@ def decode_beam_search(log_probs, alphabet, beam_size=20):
     # We define a unique blank token. The `tokens` list for the decoder will then be
     # ['<blank>', 'alif', 'ba', 'ta', ...], which correctly maps model output index 1
     # to the first character, index 2 to the second, etc.
-    blank_token = "<BLANK>"
+    blank_token = " "
     decoder_tokens = [blank_token] + alphabet
 
     decoder = ctc_decoder(
