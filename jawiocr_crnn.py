@@ -177,11 +177,8 @@ def decode_greedy(preds, alphabet):
     Returns:
       text (str), confidence (float)
     """
-    # squeeze out any singleton batch/channel dim
-    if preds.dim() == 3:
-        preds = preds.squeeze(1)  # -> (T, C)
     # get max log-prob and argmax over classes
-    probs, max_inds = preds.cpu().max(dim=1)  # both size (T,)
+    probs, max_inds = preds.cpu().max(dim=2)  # both size (T,)
     seq = max_inds.tolist()                    # turn into plain list of ints
 
     # collapse repeats & drop blanks
