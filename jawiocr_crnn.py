@@ -426,7 +426,7 @@ class JawiOCREngine:
             
             # Map index to character. Model outputs class `c` (1 to N) for a character,
             # which maps to index `c-1` in our alphabet list.
-            decoded_chars.append(self.crnn_alphabet_chars[char_index - 1])
+            decoded_chars.append(self.crnn_alphabet_chars[char_index])
             # Store the probability of the chosen character for confidence calculation
             confidence_scores.append(max_probs_sample[i].item())
 
