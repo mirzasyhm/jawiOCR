@@ -54,16 +54,14 @@ except ImportError:
     print("Error: Could not import CRNN from model.py. Ensure model.py is in the Python path.")
     sys.exit(1)
 
-
 def copyStateDict(state_dict):
     if list(state_dict.keys())[0].startswith("module."):
         new_state_dict = OrderedDict()
-        for k, v in state_dict.items(): name = k[7:]; new_state_dict[name] = v
+        for k, v in state_dict.items(): new_state_dict[k[7:]] = v
         return new_state_dict
     return state_dict
 
-# --- All utility functions (normalize, resize, getDetBoxes, etc.) remain unchanged ---
-# ... (for brevity, these functions are omitted but are identical to the previous version)
+# --- All utility functions (normalize, resize, etc.) are preserved but omitted for brevity ---
 def normalizeMeanVariance(in_img, mean=(0.485, 0.456, 0.406), variance=(0.229, 0.224, 0.225)):
     img = in_img.copy().astype(np.float32)
     img -= np.array([mean[0] * 255.0, mean[1] * 255.0, mean[2] * 255.0], dtype=np.float32)
@@ -140,8 +138,8 @@ def load_crnn_model(model_path, alphabet_path, device):
     with open(alphabet_path, 'r', encoding='utf-8') as f:
         alphabet_chars = json.load(f)
     
-    # The number of classes is the alphabet size + 1 (for the blank token).
-    # The training code implies that blank is index 0 and is not in the alphabet list.
+    # --- CORRECTED LOGIC ---
+    # The number of classes is the alphabet size + 1 (for the blank token at index 0).
     n_class = len(alphabet_chars) + 1
     model = CRNN(imgH=CRNN_IMG_HEIGHT, nc=CRNN_NUM_CHANNELS, nclass=n_class, nh=256)
     
@@ -166,64 +164,49 @@ def preprocess_for_crnn(img_crop_bgr, crnn_transform, device):
     if img_crop_bgr is None or img_crop_bgr.size == 0: return None
     return crnn_transform(img_crop_bgr).unsqueeze(0).to(device)
 
-# --- NEW: Greedy Decoder (from your training script) ---
+# --- CORRECTED: Greedy Decoder (to match training) ---
 def decode_greedy(preds, alphabet):
-    """
-    Decodes the raw model output using a simple greedy algorithm.
-    This exactly matches the logic from your provided training script.
-    """
-    # preds has shape (T, N, C) -> (Time, Batch, Classes)
-    # For inference, Batch is 1. So we squeeze it.
+    """Greedy decoder that perfectly matches the training validation logic."""
     preds = preds.squeeze(1) # -> (T, C)
-    
-    # Get the max probability indices and their scores
     probs, max_inds = preds.cpu().max(1)
     
-    # Replicate the logic: c != 0 and (j == 0 or c != seq[j-1])
-    # and alphabet[c-1]
     raw_text = []
     for i, c in enumerate(max_inds):
         if c != 0: # 0 is the blank index
             if i == 0 or c != max_inds[i - 1]:
-                raw_text.append(alphabet[c - 1]) # Important: c-1 mapping
+                # --- THIS IS THE CRITICAL FIX ---
+                # The model's output index `c` maps to `alphabet[c-1]`
+                raw_text.append(alphabet[c - 1])
     
-    # Simple confidence score: average of max probabilities of non-blank chars
-    confidence = probs[max_inds != 0].mean().item()
-    
+    confidence = probs[max_inds != 0].mean().item() if any(max_inds != 0) else 0.0
     return "".join(raw_text), confidence
 
-# --- RENAMED: Beam Search Decoder ---
+# --- CORRECTED: Beam Search Decoder (to match training) ---
 def decode_beam_search(log_probs, alphabet, beam_size=20):
-    """Decodes CRNN raw output using a beam search decoder."""
+    """Beam search decoder aligned with the training setup."""
     try:
         from torchaudio.models.decoder import ctc_decoder
     except ImportError:
         print("Error: torchaudio is required. `pip install torchaudio`"); return "DECODER_ERROR", 0.0
 
-    # The training code implies blank is index 0 and is not in the alphabet list.
-    # So, the alphabet list we pass here is exactly what the model was trained on.
-    # The decoder tokens will be ['<blank>', char1, char2, ...].
-    # To avoid conflicts, we use a unique blank token character.
-    blank_token = "<blank>"
+    # --- THIS IS THE CRITICAL FIX ---
+    # We define a unique blank token. The `tokens` list for the decoder will then be
+    # ['<blank>', 'alif', 'ba', 'ta', ...], which correctly maps model output index 1
+    # to the first character, index 2 to the second, etc.
+    blank_token = "<BLANK>"
     decoder_tokens = [blank_token] + alphabet
 
     decoder = ctc_decoder(
-        lexicon=None,
-        tokens=decoder_tokens,
-        beam_size=beam_size,
-        blank_token=blank_token,
-        sil_token=blank_token,
-        nbest=1,
-        log_add=True
+        lexicon=None, tokens=decoder_tokens, beam_size=beam_size,
+        blank_token=blank_token, sil_token=blank_token, nbest=1, log_add=True
     )
-    hypotheses = decoder(log_probs.cpu()) # Decoder works on CPU
+    hypotheses = decoder(log_probs.cpu())
     if not hypotheses or not hypotheses[0]: return "", 0.0
     
     best_hypothesis = hypotheses[0][0]
     return "".join(decoder.idxs_to_tokens(best_hypothesis.tokens)), math.exp(best_hypothesis.score)
 
 # --- Image Utilities remain unchanged ---
-# ... (for brevity, these functions are omitted but are identical to the previous version)
 def rotate_image_cv(image_cv, angle_degrees):
     if angle_degrees == 90: return cv2.rotate(image_cv, cv2.ROTATE_90_CLOCKWISE)
     if angle_degrees == 180: return cv2.rotate(image_cv, cv2.ROTATE_180)
@@ -268,7 +251,7 @@ def get_cropped_image_from_poly(image_bgr, poly_pts):
     return cv2.warpPerspective(image_bgr, M, (target_w, target_h))
 
 
-# --- MODIFIED: Main OCR Pass Function ---
+# --- Main OCR Pass Function ---
 def run_ocr_pass(image_bgr, base_fname, pass_name, args, craft_net, crnn_model, crnn_transform, crnn_alphabet, device, debug_dir):
     print(f"\n--- Starting OCR Pass: {pass_name} ---")
     detected_polys = perform_craft_inference(
@@ -291,11 +274,9 @@ def run_ocr_pass(image_bgr, base_fname, pass_name, args, craft_net, crnn_model, 
         with torch.no_grad():
             preds = crnn_model(crnn_input)
             
-            # --- MODIFIED: Choose decoder based on argument ---
             if args.decoder == 'greedy':
-                # Greedy decoder needs raw probabilities, not log_softmax
-                text_seg, conf = decode_greedy(preds.softmax(2), crnn_alphabet)
-            else: # Default to beam search
+                text_seg, conf = decode_greedy(preds, crnn_alphabet)
+            else:
                 log_probs = preds.log_softmax(2)
                 text_seg, conf = decode_beam_search(log_probs, crnn_alphabet, args.beam_size)
 
@@ -304,12 +285,12 @@ def run_ocr_pass(image_bgr, base_fname, pass_name, args, craft_net, crnn_model, 
                 results_data.append({'poly': region['poly'].tolist(), 'text': text_seg, 'conf': conf})
                 text_snippets.append(text_seg)
             
-    avg_conf = np.mean([res['conf'] for res in results_data if 'conf' in res]) if results_data else 0.0
+    avg_conf = np.mean([res['conf'] for res in results_data if 'conf' in res and res['conf'] is not None]) if results_data else 0.0
     final_text = " ".join(text_snippets)
     print(f"{pass_name} - Avg Confidence: {avg_conf:.4f}, Combined Text: {final_text}")
     return final_text, avg_conf, results_data
 
-# --- Main OCR Pipeline remains unchanged ---
+# --- Main OCR Pipeline ---
 def main_ocr_pipeline(args):
     device = torch.device('cuda' if not args.no_cuda and torch.cuda.is_available() else 'cpu')
     print(f"Using PyTorch device: {device}")
@@ -372,10 +353,7 @@ def main_ocr_pipeline(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Jawi OCR with CRAFT and CRNN')
-    # --- ADDED DECODER ARGUMENT ---
-    parser.add_argument('--decoder', type=str, default='beam', choices=['greedy', 'beam'], help="Type of CTC decoder to use: 'greedy' or 'beam'.")
-    
-    # ... other arguments remain unchanged ...
+    parser.add_argument('--decoder', type=str, default='beam', choices=['greedy', 'beam'], help="CTC decoder: 'greedy' (matches training) or 'beam' (more accurate).")
     parser.add_argument('--image_path', required=True, type=str, help="Path to input image.")
     parser.add_argument('--craft_model_path', required=True, type=str, help="Path to CRAFT model (.pth).")
     parser.add_argument('--crnn_model_path', required=True, type=str, help="Path to CRNN model (.pth).")
