@@ -17,11 +17,6 @@ craft_module_dir = os.path.join(current_script_dir, 'craft')
 
 if craft_module_dir not in sys.path: sys.path.insert(0, craft_module_dir)
 #if crnn_module_dir not in sys.path: sys.path.insert(0, crnn_module_dir)
-print(f"Adjusted sys.path. Current sys.path[0:3]: {sys.path[0:3]}")
-print(f"TensorFlow version: {tf.__version__}")
-gpus_tf = tf.config.list_physical_devices('GPU')
-if gpus_tf: print(f"TensorFlow Found GPUs: {gpus_tf}")
-else: print("TensorFlow: No GPU found.")
 # --- CRAFT Model Import and Utilities ---
 try:
     from model.craft import CRAFT
