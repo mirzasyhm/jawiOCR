@@ -410,7 +410,7 @@ class JawiOCREngine:
             if i > 0 and char_index == pred_indices_sample[i - 1]:
                 continue
             
-            decoded_chars.append(self.crnn_alphabet_chars[char_index - 1])
+            decoded_chars.append(self.crnn_alphabet_chars[char_index])
             confidence_scores.append(max_probs_sample[i].item())
 
         final_text = "".join(decoded_chars)
