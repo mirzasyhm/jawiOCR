@@ -188,7 +188,7 @@ def decode_crnn_output(log_probs, alphabet, beam_size=20):
 
     decoder = ctc_decoder(
         lexicon=None, tokens=decoder_tokens, beam_size=beam_size,
-        blank_token=blank_token, sil_token="|", nbest=1, log_add=True # Using a different sil_token is safer
+        blank_token=blank_token, sil_token=blank_token, nbest=1, log_add=True # Using a different sil_token is safer
     )
     hypotheses = decoder(log_probs.permute(1, 0, 2).cpu())
     if not hypotheses or not hypotheses[0]: return "", 0.0
