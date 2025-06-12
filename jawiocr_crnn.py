@@ -164,39 +164,40 @@ def preprocess_for_crnn(img_crop_bgr, crnn_transform, device):
     if img_crop_bgr is None or img_crop_bgr.size == 0: return None
     return crnn_transform(img_crop_bgr).unsqueeze(0).to(device)
 
-# --- VERIFIED Greedy Decoder ---
+# --- EXACT MATCH Greedy Decoder ---
 def decode_greedy(preds, alphabet):
     """
-    Greedy CTC decoder matching the validation logic:
-      - removes blank tokens (index 0)
-      - collapses consecutive repeats
-      - computes mean confidence over non-blank frames
-    Args:
-      preds: Tensor of shape (T, 1, C) or (T, C), already log-softmaxed over dim=1
-      alphabet: list or string mapping class indices 1.. to characters
-    Returns:
-      text (str), confidence (float)
+    Greedy decoder rewritten to be an EXACT structural match to the provided
+    training script's validation logic.
     """
-    # get max log-prob and argmax over classes
-    probs, max_inds = preds.cpu().max(dim=2)  # both size (T,)
-    seq = max_inds.tolist()                    # turn into plain list of ints
+    # preds shape is (T, N, C) where N=1 for inference.
+    # 1. Get the indices of the most likely character at each time step.
+    #    This matches: _, max_inds = preds.cpu().max(2)
+    probs, max_inds = preds.cpu().softmax(2).max(2)
 
-    # collapse repeats & drop blanks
-    decoded_chars = [
-        alphabet[c - 1]
-        for i, c in enumerate(seq)
-        if c != 0 and (i == 0 or c != seq[i - 1])
-    ]
-    text = ''.join(decoded_chars)
+    # 2. Extract the sequence for the single item in the batch.
+    #    This matches: seq = max_inds[:, i].tolist()
+    seq = max_inds[:, 0].tolist()
+    
+    # Extract the probabilities for the confidence score
+    seq_probs = probs[:, 0].tolist()
 
-    # mean confidence over all non-blank frames
-    non_blank_mask = max_inds != 0
-    if non_blank_mask.any():
-        confidence = probs[non_blank_mask].mean().item()
-    else:
-        confidence = 0.0
+    # 3. Join characters into a string using the EXACT list comprehension.
+    #    This matches: ''.join(alphabet[c-1] for j,c in enumerate(seq)...)
+    raw_text = []
+    conf_scores = []
+    for j, c in enumerate(seq):
+        if c != 0 and (j == 0 or c != seq[j-1]):
+            # Append the character using the c-1 mapping
+            raw_text.append(alphabet[c - 1])
+            # Keep the probability of this character for the confidence score
+            conf_scores.append(seq_probs[j])
 
-    return text, confidence
+    # 4. Calculate final text and confidence
+    final_text = "".join(raw_text)
+    confidence = np.mean(conf_scores) if conf_scores else 0.0
+    
+    return final_text, float(confidence)
 
 # --- CORRECTED: Beam Search Decoder (to match training) ---
 def decode_beam_search(log_probs, alphabet, beam_size=20):
